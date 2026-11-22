@@ -176,9 +176,9 @@ console.log('\n[负数与冲销]');
 console.log('\n[摘要恰好是合计]');
 {
   const { p } = parse([
-    ['日期', '单据号', '商品名称', '数量', '单价', '金额', '摘要'],
-    ['2025-12-30', 'A', '零件', 1, 100, 100, '合计'],
-    ['2025-12-30', 'A', '本单合计', 1, null, 100],
+    ['日期', '单据号', '商品名称', '数量', '单价', '金额', '摘要', '客户'],
+    ['2025-12-30', 'A', '零件', 1, 100, 100, '合计', '华远'],
+    ['2025-12-30', 'A', '本单合计', 1, null, 100, null, '华远'],
     [null, null, null, null, null, 100, '合计']
   ]);
   eq(p.records.length, 1, '保留摘要写「合计」的业务');
@@ -199,16 +199,16 @@ console.log('\n[日期格式边界和日期系统]');
 console.log('\n[多列日期按原表行比较]');
 {
   const rows = [
-    ['日期', '记账日期', '单据号', '金额'],
-    ['2025/12/31', 46022.5, 'A', 100],
-    ['2026-01-01', '20260101', 'B', 200]
+    ['日期', '记账日期', '单据号', '金额', '客户'],
+    ['2025/12/31', 46022.5, 'A', 100, '华远'],
+    ['2026-01-01', '20260101', 'B', 200, '东方']
   ];
   const same = parse(rows);
   eq(same.p.records.map(r => r.dateText).join(','), '2025-12-31,2026-01-01', '日期格式不同但日历日期完全一致时接受');
   for (const value of ['2025-12-30', null]) {
     const different = [
       ...rows.slice(0, 2),
-      ['2026-01-05', value, 'B', 200]
+      ['2026-01-05', value, 'B', 200, '东方']
     ];
     const header = Core.detectHeader(different, 'x');
     const p = Core.parseRows(different, header, { firstExcelRow: 5 });
@@ -221,13 +221,13 @@ console.log('\n[多列日期按原表行比较]');
 console.log('\n[重复单据与三位以上小数]');
 {
   const { p } = parse([
-    ['日期', '单据号', '金额'],
-    ['2025-12-30', 'XS-2025-001', '1,234.567'],
-    ['2025-12-30', 'XS-2025-001', 1.005],
-    ['2025-12-30', 'XS-2025-002', -1.005],
-    ['2025-12-31', 'XS-2025-002', '（1.2345）'],
-    ['2025-12-31', '', 1e-7],
-    ['2025-12-31', '', 1.01]
+    ['日期', '单据号', '金额', '客户'],
+    ['2025-12-30', 'XS-2025-001', '1,234.567', '华远'],
+    ['2025-12-30', 'XS-2025-001', 1.005, '华远'],
+    ['2025-12-30', 'XS-2025-002', -1.005, '东方'],
+    ['2025-12-31', 'XS-2025-002', '（1.2345）', '东方'],
+    ['2025-12-31', '', 1e-7, '华远'],
+    ['2025-12-31', '', 1.01, '华远']
   ]);
   eq(p.records.map(r => r.cents).join(','), '123457,101,-101,-123,0,101', '逐笔按十进制四舍五入到分');
   ok(p.problems.some(s => /有 5 行金额是三位以上小数，已按四舍五入到分/.test(s)), '小数位数提示含科学计数法数值');
@@ -268,12 +268,12 @@ console.log('\n[重复单据与三位以上小数]');
   ok(xml.includes('<f>SUM(J8:J9)</f><v>0</v>'), '实际写出的 XLSX XML 同时含公式和缓存值');
 
   console.log('\n[B1 · 带限定语的合计行]');
-  const productHead = ['日期', '单据号', '商品名称', '数量', '单价', '金额'];
-  const product = ['2025-12-30', 'A', '零件', 1, 500, 500];
+  const productHead = ['日期', '单据号', '商品名称', '数量', '单价', '金额', '客户'];
+  const product = ['2025-12-30', 'A', '零件', 1, 500, 500, '华远'];
   await loadFile([
-    productHead, product, ['2025-12-30', 'A', '配件', 1, 600, 600],
-    ['2025-12-30', 'A', '本单合计（价税合计）', 2, null, 1100],
-    ['2025-12-31', 'B', '材料', 1, 1000, 1000],
+    productHead, product, ['2025-12-30', 'A', '配件', 1, 600, 600, '华远'],
+    ['2025-12-30', 'A', '本单合计（价税合计）', 2, null, 1100, '华远'],
+    ['2025-12-31', 'B', '材料', 1, 1000, 1000, '东方'],
     ['2025-12-31', 'B', '本单合计（价税合计）', 1, null, 1000]
   ]);
   fire('genBtn', 'click');
@@ -287,15 +287,15 @@ console.log('\n[重复单据与三位以上小数]');
     'B1：读取情况留有两行价税合计的原始行号');
   for (const label of ['合计：不含税', '本页小计（不含税）', '2025年12月合计', '2025-12合计含税']) {
     const description = '合计（按合同约定分批交付）';
-    await loadFile([productHead, product, ['2025-12-30', 'B', description, 1, 200, 200],
-      ['2025-12-30', 'A', label, 2, null, 700]]);
+    await loadFile([productHead, product, ['2025-12-30', 'B', description, 1, 200, 200, '东方'],
+      ['2025-12-30', 'A', label, 2, null, 700, '华远']]);
     fire('genBtn', 'click');
     const variant = table(fixture.readExport());
     eq(JSON.stringify(variant.filter(row => typeof row[0] === 'number' && typeof row[9] === 'number').map(row => [row[8], row[9]])),
       JSON.stringify([['零件', 500], [description, 200]]), 'B1：排除「' + label + '」并保留括号内有长说明的业务');
   }
 
-  console.log('\n[第三轮 · 合计标签和单据号]');
+  console.log('\n[合计标签和往来单位]');
   const reviewHead = [...head, '摘要'];
   await loadFile([
     reviewHead,
@@ -305,46 +305,84 @@ console.log('\n[重复单据与三位以上小数]');
     ['2025-12-31', '', '', 300, '合 计'],
     ['2025-12-31', '', '', 300, '合计：']
   ]);
-  ok(/3 笔 \/ 1,500\.00/.test(el('statBox').innerHTML), '第三轮：有单据号的三笔业务计入预览');
+  ok(/3 笔 \/ 1,500\.00/.test(el('statBox').innerHTML), '有往来单位的三笔业务计入预览');
   fire('genBtn', 'click');
   const reviewWb = fixture.readExport();
   const reviewGrid = table(reviewWb);
   eq(reviewGrid.filter(row => typeof row[9] === 'number' && typeof row[0] === 'number').map(row => row[6]).join(','),
-    'A,B,C', '第三轮：底稿保留摘要恰好是合计标签的业务，排除单据号为空的同类行');
+    'A,B,C', '底稿保留摘要恰好是合计标签的业务，排除往来单位为空的同类行');
   eq(reviewGrid.filter(row => row[1] === '合计行').map(row => row[0]).join(','), '5,6',
     '第三轮：「合 计」和「合计：」出现在读取情况中');
 
-  const taxHead = ['日期', '单据号', '商品名称', '数量', '金额'];
+  const taxHead = ['日期', '单据号', '商品名称', '数量', '金额', '客户'];
   await loadFile([
     taxHead,
-    ['2025-12-31', 'FA-1', '商品', 1, 1500],
-    ['2025-12-31', 'FA-1', '价税合计', null, 1695],
-    ['2025-12-31', 'FA-1', 'SubTotal', null, 3195.01],
-    ['2025-12-31', 'FA-2', '商品', 1, -50],
-    ['2025-12-31', 'FA-2', '价税合计', null, -50.02],
-    ['2025-12-31', 'FA-2', '本次合计', null, -100.03],
+    ['2025-12-31', 'FA-1', '商品', 1, 1500, '华远'],
+    ['2025-12-31', 'FA-1', '价税合计', null, 1695, '华远'],
+    ['2025-12-31', 'FA-1', '小计', null, 3195.01, '华远'],
+    ['2025-12-31', 'FA-2', '商品', 1, -50, '东方'],
+    ['2025-12-31', 'FA-2', '价税合计', null, -50.02, '东方'],
+    ['2025-12-31', 'FA-2', '本次合计', null, -100.03, '东方'],
     ['2025-12-31', '', '价税合计', null, 1695],
     ['2025-12-31', '', '2025年12月合计', '', 1000],
     ['2025-12-31', '', 'Total', '', 1000],
-    ['2025-12-31', 'FA-3', '商品', 1, 20],
+    ['2025-12-31', 'FA-3', '商品', 1, 20, '南山'],
     ['2025-12-31', '　', '（本行共计人民币）', null, 999],
-    ['2025-12-31', 'FA-4', '商品', 1, 5],
-    ['2025-12-31', 'FA-4', '总合计（小写）', null, 5]
+    ['2025-12-31', 'FA-4', '商品', 1, 5, '海岚'],
+    ['2025-12-31', 'FA-4', '总合计（小写）', null, 5],
+    ['2025-12-31', '', 'SubTotal', null, 3119.98]
   ]);
   fire('genBtn', 'click');
   const taxWb = fixture.readExport();
   const taxGrid = table(taxWb);
   const taxTotal = taxWb.Sheets['截止测试']['J' + (taxGrid.findIndex(row => row[0] === '合计') + 1)];
-  eq(taxTotal.v, 3119.98, '第三轮：有单据号的价税合计 1695 和相差两分的 -50.02 均计入，底稿合计 3,119.98');
-  eq(taxTotal.f, 'SUM(J8:J13)', '第三轮：底稿合计公式覆盖六笔业务');
-  eq(taxGrid.filter(row => row[1] === '合计行').map(row => row[0]).join(','), '4,7,8,9,10,12,14',
-    '第三轮：一分容差双向包含，且每次排除合计行后重新累计');
+  eq(taxTotal.v, 3119.98, '有往来单位的价税合计 1695 和相差两分的 -50.02 均计入，底稿合计 3,119.98');
+  eq(taxTotal.f, 'SUM(J8:J13)', '底稿合计公式覆盖六笔业务');
+  eq(taxGrid.filter(row => row[1] === '合计行').map(row => row[0]).join(','), '4,7,8,9,10,12,14,15',
+    '一分容差双向包含，小计后重置段内累计，空客户的 SubTotal 排除');
 
   const businessLabels = ['销售出库合计', '合计（按合同约定分批交付）', '合计（元）', '累计合计', '小计合计', 'Total额'];
   await loadFile([reviewHead, ...businessLabels.map(label => ['2025-12-31', '', '华远', 100, label])]);
   fire('genBtn', 'click');
   eq(table(fixture.readExport()).filter(row => typeof row[9] === 'number' && typeof row[0] === 'number').map(row => row[8]).join(','),
     businessLabels.join(','), '第三轮：长句和标签族以外的整格写法仍计入业务');
+
+  console.log('\n[第四轮 · F1–F5 复核反例]');
+  await loadFile([
+    ['日期', '发票号', '货物名称', '金额'],
+    ['2025-12-30', 'FP-001', '零件', 1695],
+    ['2025-12-30', 'FP-001', '配件', 1695],
+    ['2025-12-30', 'FP-001', '价税合计', 3390]
+  ], '发票明细');
+  fire('genBtn', 'click');
+  const invoice = fixture.readExport();
+  ok(el('genBtn').disabled && /找不到往来单位列/.test(el('readInfo').innerHTML) && !invoice,
+    'F1：只有货物名称的发票整表拒绝' +
+    (invoice ? '，实际导出 ' + table(invoice).find(row => row[0] === '合计')[9] : ''));
+
+  const first = ['2025-12-30', 'A', '华远', 1000, '零件'];
+  const second = ['2025-12-31', 'B', '东方', 2000, '配件'];
+  for (const [label, rows, sourceRows, skippedRows, totalAmount] of [
+    ['F2', [first, ['2025-12-30', 'A', '', 1000, '本单合计'],
+      second, ['2025-12-31', 'B', '', 2000, '本单合计'],
+      ['2025-12-31', 'M-12', '东方', 3000, '本月合计']], '2,4', '3,5,6', 3000],
+    ['F3', [first, second, ['2025-12-31', 'T-12', '东方', 3000, '合计（元）']], '2,3', '4', 3000],
+    ['F4-A', [first, ['2025-12-31', '', '东方', 2000, '合计']], '2,3', '', 3000],
+    ['F5（F4-B）', [first, ['2025-12-31', 'B', '东方', 1000, '配件'],
+      ['2025-12-31', '', '南山', 200, '合计：不含税']], '2,3,4', '', 2200]
+  ]) {
+    await loadFile([reviewHead, ...rows]);
+    fire('genBtn', 'click');
+    const result = fixture.readExport();
+    ok(result, label + '：点击生成后可回读底稿');
+    if (!result) continue;
+    const grid = table(result);
+    eq(grid.filter(row => typeof row[9] === 'number' && typeof row[0] === 'number').map(row => row[1]).join(','),
+      sourceRows, label + '：底稿保留的原表行号');
+    eq(grid.filter(row => row[1] === '合计行').map(row => row[0]).join(','),
+      skippedRows, label + '：读取情况记录排除的合计行');
+    eq(grid.find(row => row[0] === '合计')?.[9], totalAmount, label + '：底稿合计缓存');
+  }
 
   console.log('\n[N1 · 同号明细与疑似重复粘贴]');
   const pasted = ['2025-12-30', 'DUP-001', '华远', '1,234.560'];
@@ -421,12 +459,12 @@ console.log('\n[重复单据与三位以上小数]');
   console.log('\n[N2 · 被拒工作表的抬头与数量上限]');
   const rejected = XLSX.utils.book_new();
   const dateConflict = [
-    ['日期', '记账日期', '单据号', '金额'],
-    ['2025-12-31', '2025-12-30', 'CONFLICT', 999]
+    ['日期', '记账日期', '单据号', '金额', '客户'],
+    ['2025-12-31', '2025-12-30', 'CONFLICT', 999, '华远']
   ];
   for (const [name, rows] of [
     ['12月', dateConflict], ['封面汇总', [head, a]],
-    ['两列金额', [['日期', '单据号', '金额', '含税金额'], ['2025-12-31', 'B', 100, 200]]],
+    ['两列金额', [['日期', '单据号', '金额', '含税金额', '客户'], ['2025-12-31', 'B', 100, 200, '东方']]],
     ['空明细', [head]], ['封面', [['封面']]], ['附注', [['附注']]]
   ]) {
     XLSX.utils.book_append_sheet(rejected, XLSX.utils.aoa_to_sheet(rows), name);

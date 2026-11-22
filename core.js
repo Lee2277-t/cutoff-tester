@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.4';
+  var VERSION = '0.1.5';
 
   /* ---------------- 基础 ---------------- */
 
@@ -156,6 +156,8 @@
   var AMOUNT_WORDS = /金额|价税合计|合计金额|总金额|amount/;
   var DOC_WORDS = /单据号|单号|凭证号|发票号|出库单|入库单|编号|no\.?$|单据统计号/;
   var PARTY_WORDS = /客户|供应商|单位名称|往来单位|购货单位|销售单位|对方单位|户名|公司名称|名称/;
+  // 「商品名称」「货物名称」是货物，不是往来单位——当成单位会让合计行看起来像业务行
+  var GOODS_WORDS = /商品|货物|品名|产品|物资/;
   var SUMMARY_WORDS = /摘要|备注|说明|品名|货物名称|商品名称|事由|内容/;
   // 出现这些词，说明这更可能是余额表/科目表，不是流水
   var BALANCE_WORDS = /余额|期初|期末|借方|贷方|累计/;
@@ -181,7 +183,7 @@
         if (colScore(h, DATE_WORDS)) cols.date.push(c);
         if (colScore(h, AMOUNT_WORDS)) cols.amount.push(c);
         if (colScore(h, DOC_WORDS)) cols.doc.push(c);
-        if (colScore(h, PARTY_WORDS)) cols.party.push(c);
+        if (colScore(h, PARTY_WORDS) && !GOODS_WORDS.test(norm(h))) cols.party.push(c);
         if (colScore(h, SUMMARY_WORDS)) cols.summary.push(c);
       }
       if (cols.date.length && cols.amount.length) {
@@ -223,6 +225,13 @@
       sheetName: str(sheetName || '')
     };
 
+    // 截止测试最后要落到「谁的单」，没有往来单位就没法追——直接拒绝，不猜
+    if (header.partyCol < 0) {
+      header.usable = false;
+      problems.push('找不到往来单位列（客户 / 供应商 / 单位名称 / 往来单位）。' +
+        '截止测试要按单位追查，请确认表里有单位名称这一列后再导入。');
+    }
+
     // 多列都叫「金额」时不能任选一列
     if (best.cols.amount.length > 1) {
       var names = best.cols.amount.map(function (c) { return str(heads[c]).trim(); });
@@ -249,9 +258,19 @@
   }
 
   var TOTAL_CELL = /^(?:(?:本页|本表|以上|本单|本月|本期|本日|本季|本年|本行|本次|单据|明细|价税|金额|不含税|税额|总|\d{4}年\d{1,2}月|\d{4}-\d{1,2}|\d{1,2}月)?(?:合计|小计|总计|共计|累计)(?:数|额|金额|不含税|含税|价税合计|未税|税额|人民币|大写|小写)?|total|subtotal)$/;
+  var SUBTOTAL_CELL = /^(?:(?:本页|本表|本单|本行|本次|单据|明细|\d{4}年\d{1,2}月|\d{1,2}月)?小计(?:数|额|金额)?)$/;
+  function hasSubtotalLabel(row) {
+    for (var c = 0; c < row.length; c++) {
+      if (SUBTOTAL_CELL.test(norm(row[c]))) return true;
+    }
+    return false;
+  }
   function hasTotalLabel(row) {
     for (var c = 0; c < row.length; c++) {
-      if (TOTAL_CELL.test(norm(row[c]))) return true;
+      var cell = str(row[c]);
+      var inner = /[（(]([^）)]*)[）)]/.exec(cell);
+      if (inner && inner[1].length <= 6) cell = cell.replace(/[（(][^）)]*[）)]/g, '');
+      if (TOTAL_CELL.test(norm(cell))) return true;
     }
     return false;
   }
@@ -268,7 +287,7 @@
       return { records: [], skipped: [], problems: problems, badDates: 0, badAmounts: 0 };
     }
 
-    var badDates = 0, badAmounts = 0, roundedAmounts = 0, detailCents = 0;
+    var badDates = 0, badAmounts = 0, roundedAmounts = 0, detailCents = 0, totalCents = 0;
     var dateOpts = { date1904: opts.date1904 };
     var otherDateCols = (header.dateCols || [header.dateCol]).slice(1);
     var detailCounts = new Map(), duplicateDocs = new Map();
@@ -287,11 +306,20 @@
       if (!any) continue;
 
       var amount = parseAmount(amtRaw);
-      // 带单据号的合计标签只有与本段明细之和相差至多一分时才排除。
-      if (hasTotalLabel(row) && (!docNo || (amount !== null && Math.abs(amount.cents - detailCents) <= 1))) {
-        skipped.push({ row: excelRow, reason: '合计行', raw: summary || party || docNo });
-        detailCents = 0;
-        continue;
+      // 合计行的判据（不再只看标签，也不只看单据号）：
+      // 真实业务一定有一个往来单位；合计行通常没有。
+      //   标签像合计 且（本行没有往来单位 或 金额等于本段/全表累计） → 合计行
+      //   标签像合计 但有往来单位、金额也对不上 → 业务行（摘要写着「合计」的真实业务）
+      if (hasTotalLabel(row)) {
+        var isSub = hasSubtotalLabel(row);
+        var refSum = isSub ? detailCents : totalCents;
+        var nearSum = amount !== null && (Math.abs(amount.cents - refSum) <= 1 ||
+          Math.abs(amount.cents - detailCents) <= 1);
+        if (!party || nearSum) {
+          skipped.push({ row: excelRow, reason: '合计行', raw: summary || party || docNo });
+          if (isSub) detailCents = 0;
+          continue;
+        }
       }
 
       var d = parseDate(dateRaw, dateOpts);
@@ -325,6 +353,7 @@
 
       if (amount.rounded) roundedAmounts++;
       detailCents += amount.cents;
+      totalCents += amount.cents;
       var dateLabel = dateText(d);
       if (docNo) {
         var key = JSON.stringify([docNo, dateLabel, amount.exact, party]);

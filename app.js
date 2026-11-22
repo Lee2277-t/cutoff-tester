@@ -67,10 +67,15 @@
         var layout = csvRows[headerRow];
         for (var r = headerRow + 1; r < csvRows.length; r++) {
           var row = csvRows[r];
-          if (row.columns === layout.columns) continue;
-          parseWhy = '第 ' + row.line + ' 行列数和表头不一致（该行 ' + row.columns + ' 个字段，表头 ' +
-            layout.columns + ' 个字段）。常见原因是千分位或文本里的逗号没加引号，' +
-            '请给含逗号的内容加上双引号，并保留空列的分隔符。';
+          if (row.columns !== layout.columns) {
+            parseWhy = '第 ' + row.line + ' 行列数和表头不一致（该行 ' + row.columns + ' 个字段，表头 ' +
+              layout.columns + ' 个字段）。常见原因是千分位或文本里的逗号没加引号，';
+          } else if (!layout.lastFieldHasValue && row.lastFieldHasValue) {
+            parseWhy = '第 ' + row.line + ' 行在无列名的尾列中有内容。可能是金额中的千分位逗号把金额切开了。';
+          } else {
+            continue;
+          }
+          parseWhy += '请给含逗号的内容加上双引号，并保留空列的分隔符。';
           return;
         }
       }
@@ -121,10 +126,11 @@
     var line = directive ? 2 : 1;
     var rowLine = line, rowStart = start, fieldStart = start, columns = 1, quoted = false;
     var rows = [];
-    function finishRow() {
-      rows.push({ line: rowLine, columns: columns });
+    function finishRow(end) {
+      var lastField = text.slice(fieldStart, end).trim();
+      rows.push({ line: rowLine, columns: columns, lastFieldHasValue: !/^(?:"\s*")?$/.test(lastField) });
     }
-    // 工作表会丢掉空字段，CSV 列数和原始行号需要从源文本保留。
+    // 从源文本保留字段数、尾列是否为空和记录起始行号。
     for (var i = start; i < text.length; i++) {
       var ch = text.charAt(i);
       if (ch === '"' && text.charAt(fieldStart) === '"') quoted = !quoted;
@@ -133,17 +139,17 @@
         fieldStart = i + 1;
       }
       else if (ch === '\r' || ch === '\n') {
+        if (!quoted) finishRow(i);
         if (ch === '\r' && text.charAt(i + 1) === '\n') i++;
         line++;
         if (!quoted) {
-          finishRow();
           rowLine = line;
           fieldStart = rowStart = i + 1;
           columns = 1;
         }
       }
     }
-    if (rowStart < text.length) finishRow();
+    if (rowStart < text.length) finishRow(text.length);
     return { separator: sep, rows: rows };
   }
 

@@ -107,21 +107,21 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   console.log('\n[单据式明细中的本单合计]');
   await loadFile([
-    ['日期', '单据号', '商品名称', '数量', '单价', '金额'],
-    ['2025-12-30', 'A', '零件', 1, 500, 500],
-    ['2025-12-30', 'A', '配件', 1, 600, 600],
-    ['2025-12-30', 'A', '本单合计', 2, null, 1100],
-    ['2026-01-01', 'B', '材料', 1, 1000, 1000],
-    ['2026-01-01', 'B', '零件', 1, 1100, 1100],
+    ['日期', '单据号', '商品名称', '数量', '单价', '金额', '客户'],
+    ['2025-12-30', 'A', '零件', 1, 500, 500, '华远'],
+    ['2025-12-30', 'A', '配件', 1, 600, 600, '华远'],
+    ['2025-12-30', 'A', '本单合计', 2, null, 1100, '华远'],
+    ['2026-01-01', 'B', '材料', 1, 1000, 1000, '东方'],
+    ['2026-01-01', 'B', '零件', 1, 1100, 1100, '东方'],
     ['2026-01-01', 'B', '本单合计', 2, null, 2100]
   ]);
   ok(/4 笔 \/ 3,200\.00/.test(el('statBox').innerHTML), '本单合计排除后仍是 4 笔 3,200.00');
   ok(/合计行：2 行.*第 4 行.*第 7 行/.test(el('readInfo').innerHTML), '界面列出两行本单合计的原表行号');
   await loadFile([
-    ['日期', '单据号', '商品名称', '金额'],
-    ['2025-12-30', 'A', '材料', 1100],
-    ['2025-12-30', 'A', '本单合计（价税合计）', 1100],
-    ['2025-12-31', 'B', '零件', 1000],
+    ['日期', '单据号', '商品名称', '金额', '客户'],
+    ['2025-12-30', 'A', '材料', 1100, '华远'],
+    ['2025-12-30', 'A', '本单合计（价税合计）', 1100, '华远'],
+    ['2025-12-31', 'B', '零件', 1000, '东方'],
     ['2025-12-31', 'B', '合计：不含税', 1000]
   ]);
   ok(/2 笔 \/ 2,100\.00/.test(el('statBox').innerHTML) &&
@@ -130,20 +130,20 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   console.log('\n[日期边界与 1904 工作簿]');
   await loadFile([
-    ['日期', '单据号', '金额'],
-    ['1979-12-31', 'TEXT-OLD', 10],
-    ['1980-01-01', 'TEXT-OK', 20],
-    [24999, 'SERIAL-OLD', 30],
-    [25000, 'SERIAL-OK', 40]
+    ['日期', '单据号', '金额', '客户'],
+    ['1979-12-31', 'TEXT-OLD', 10, '华远'],
+    ['1980-01-01', 'TEXT-OK', 20, '华远'],
+    [24999, 'SERIAL-OLD', 30, '东方'],
+    [25000, 'SERIAL-OK', 40, '东方']
   ]);
   ok(/2 笔 \/ 60\.00/.test(el('statBox').innerHTML), '年份和序列号各保留达到下限的行');
   ok(/日期读不出：2 行.*第 2 行.*第 4 行/.test(el('readInfo').innerHTML), '不合下限的日期有原表行号');
   const dates = XLSX.utils.book_new();
   dates.Workbook = { WBProps: { date1904: true } };
   const ws = XLSX.utils.aoa_to_sheet([
-    ['日期', '记账日期', '单据号', '金额'],
-    [44560, '2025-12-31', 'A', 100],
-    [44561.5, '2026-01-01', 'B', 200]
+    ['日期', '记账日期', '单据号', '金额', '客户'],
+    [44560, '2025-12-31', 'A', 100, '华远'],
+    [44561.5, '2026-01-01', 'B', 200, '东方']
   ]);
   ws.A2.z = ws.A3.z = 'yyyy-mm-dd hh:mm';
   XLSX.utils.book_append_sheet(dates, ws, '1904日期系统');
@@ -153,9 +153,9 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   console.log('\n[日期列值冲突]');
   await loadFile([
-    ['日期', '记账日期', '单据号', '金额'],
-    ['2025-12-31', '2025-12-31', 'A', 1000],
-    ['2026-01-05', '2025-12-30', 'B', 2000]
+    ['日期', '记账日期', '单据号', '金额', '客户'],
+    ['2025-12-31', '2025-12-31', 'A', 1000, '华远'],
+    ['2026-01-05', '2025-12-30', 'B', 2000, '东方']
   ]);
   eq(el('genBtn').disabled, true, '不让冲突日期生成底稿');
   eq(el('tableBody').innerHTML, '', '冲突时也清空预览');
@@ -227,6 +227,28 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   ok(!unquotedExport && fixture.readExport()?.Sheets['截止测试'].J12?.v === 322592.57,
     '第三轮：错列整表拒绝；补上引号后四笔全部计入，尾部空字段和无末尾换行仍可读');
 
+  console.log('\n[第四轮 B1 · 无列名的尾字段被千分位补满]');
+  const unnamedHead = '日期,单据号,客户,金额,';
+  const splitAmount = '2025-12-27,CK-1121,华远,128,000';
+  await loadCsv([unnamedHead, splitAmount].join('\n'));
+  fire('genBtn', 'click');
+  ok(el('genBtn').disabled && fixture.written === null &&
+    /第 2 行.*无列名的尾列.*千分位.*双引号/.test(el('readInfo').innerHTML),
+    'B1：等宽但无名尾列有 000 时拒绝，提示原表行号和金额引号');
+
+  const splitRows = [splitAmount, '2025-12-30,CK-1130,东方,65,000', '2025-12-31,CK-1131,南山,129,000'];
+  await loadCsv([unnamedHead, ...splitRows].join('\r\n'));
+  fire('genBtn', 'click');
+  const truncated = fixture.readExport();
+  ok(el('genBtn').disabled && el('statBox').innerHTML === '' && !truncated,
+    'B1：整份 CSV 拒绝' + (truncated ? '，实际导出 ' + truncated.Sheets['截止测试'].J11?.v : ''));
+  await loadCsv([unnamedHead, '2025-12-27,CK-1121,华远,"128,000",',
+    '2025-12-30,CK-1130,东方,"65,000",""', '2025-12-31,CK-1131,南山,"129,000", '].join('\r\n'));
+  fire('genBtn', 'click');
+  const restored = fixture.readExport()?.Sheets['截止测试'];
+  ok(restored?.J11?.v === 322000 && restored.J11.f === 'SUM(J8:J10)',
+    'B1：金额加引号且无名尾列留空后，三条明细的底稿合计为 322,000.00');
+
   console.log('\n[多工作表生成与切换示例]');
   const months = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(months, XLSX.utils.aoa_to_sheet([head, a]), '11月');
@@ -241,8 +263,8 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   const fallback = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(fallback, XLSX.utils.aoa_to_sheet([
-    ['日期', '记账日期', '单据号', '金额'],
-    ['2025-12-31', '2025-12-30', 'CONFLICT', 999]
+    ['日期', '记账日期', '单据号', '金额', '客户'],
+    ['2025-12-31', '2025-12-30', 'CONFLICT', 999, '华远']
   ]), '12月');
   XLSX.utils.book_append_sheet(fallback, XLSX.utils.aoa_to_sheet([head, a]), '封面汇总');
   await loadWorkbook(fallback);

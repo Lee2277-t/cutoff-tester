@@ -53,7 +53,7 @@ const rows1 = [
   ['2026-01-02', 'CK-002', '东方', 3400.5, '出库']
 ];
 const h1 = Core.detectHeader(rows1, '出库单');
-eq(h1.usable, true, '有日期有金额就能用');
+eq(h1.usable, true, '有日期、金额和往来单位列就能用');
 eq(h1.rowIndex, 2, '表头在第 3 行');
 eq(h1.dateCol, 0, '日期列');
 eq(h1.amountCol, 3, '金额列');
@@ -68,9 +68,9 @@ ok(h2.problems.join('').indexOf('日期') >= 0, '拒绝理由说日期');
 const h3 = Core.detectHeader([['单据号', '客户', '金额'], ['CK-1', '华远', 100]], 'x');
 eq(h3.usable, false, '没有日期列拒绝');
 
-const h4 = Core.detectHeader([['日期', '单据号', '不含税金额', '价税合计'], ['2025-01-01', 'CK-1', 100, 113]], 'x');
+const h4 = Core.detectHeader([['日期', '单据号', '客户', '不含税金额', '价税合计'], ['2025-01-01', 'CK-1', '华远', 100, 113]], 'x');
 eq(h4.usable, false, '两列都像金额时拒绝');
-ok(h4.problems.join('').indexOf('金额') >= 0, '说清是金额列分不清');
+ok(h4.problems.some(msg => /2 列都像金额/.test(msg)), '说清是金额列分不清');
 
 const h5 = Core.detectHeader([['日期', '单据号', '单位名称', '余额'], ['2025-01-01', 'CK-1', '华远', 100]], 'x');
 eq(h5.usable, false, '有余额列没单据号 → 当余额表拒绝');
