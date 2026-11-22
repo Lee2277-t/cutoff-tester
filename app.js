@@ -11,9 +11,12 @@
     sheetName: '',
     header: null,
     parsed: null,
+    picked: null,
     items: [],
+    otherSheets: 0,
     error: ''
   };
+  var queuedOtherSheets = 0;
 
   function $(id) { return document.getElementById(id); }
   function esc(s) {
@@ -22,6 +25,7 @@
     });
   }
   function money(c) { return Core.moneyText(c); }
+  function toDate(v) { return Core.parseDate(String(v || '').trim()); }
 
   /* ---------------- 读表 ---------------- */
 
@@ -47,7 +51,7 @@
 
   /** 逐张试，按「读出的记录数」挑最像流水的那张 */
   function pickSheet(wb) {
-    var best = null, why = '', emptyCount = 0;
+    var best = null, why = '', emptyCount = 0, usableCount = 0;
     wb.SheetNames.forEach(function (name) {
       var rows = sheetRows(wb, name);
       var header = Core.detectHeader(rows, name);
@@ -55,13 +59,14 @@
         if (!why && header.problems.length) why = header.problems.join('；');
         return;
       }
-      var parsed = Core.parseRows(rows, header, { firstExcelRow: sheetOrigin(wb, name) + 1 });
+      var parsed = Core.parseRows(rows, header, { firstExcelRow: sheetOrigin(wb, name) + 1, date1904: Core.date1904Of(wb) });
       if (!parsed.records.length) { emptyCount++; if (!why) why = parsed.problems.join('；'); return; }
-      var cand = { name: name, header: header, parsed: parsed, rows: rows };
+      usableCount++;
+      var cand = { name: name, header: header, parsed: parsed, rows: rows, origin: sheetOrigin(wb, name) };
       if (!best || cand.parsed.records.length > best.parsed.records.length) best = cand;
     });
     if (!best && !why && emptyCount) why = '表里没有读到「日期 + 金额」都齐全的行。';
-    return { best: best, why: why };
+    return { best: best, why: why, usableSheets: usableCount };
   }
 
   function decodeCsv(buf) {
@@ -124,12 +129,20 @@
     }
     if (!state.header) { box.innerHTML = ''; return; }
     var h = state.header;
+    var origin = (state.picked && state.picked.origin) || 0;
     var lines = [];
-    lines.push('<div class="note">表头在第 ' + (h.rowIndex + 1) + ' 行：日期列「' + esc(h.dateHead) +
+    lines.push('<div class="note">表头在第 ' + (origin + h.rowIndex + 1) + ' 行：日期列「' + esc(h.dateHead) +
       '」，金额列「' + esc(h.amountHead) + '」' +
       (h.docCol >= 0 ? '，单据号「' + esc(h.heads[h.docCol]) + '」' : '，没有单据号列') + '。</div>');
+    if (state.otherSheets > 0) {
+      lines.push('<div class="note warn">这个工作簿里还有 ' + state.otherSheets + ' 张表也能读，' +
+        '现在只用「' + esc(state.sheetName) + '」这一张。要换表请把那张单独存一个文件。</div>');
+    }
     var probs = (state.parsed && state.parsed.problems) || [];
     probs.forEach(function (p) { lines.push('<div class="note warn">' + esc(p) + '</div>'); });
+    // 读行之后的补充检查（比如完全没有单据号）也要显示出来
+    var extra = Core.selfCheck((state.parsed && state.parsed.records) || [], toDate($('cutOff').value));
+    extra.forEach(function (p) { lines.push('<div class="note warn">' + esc(p) + '</div>'); });
     var skipped = (state.parsed && state.parsed.skipped) || [];
     if (skipped.length) {
       var byReason = {};
@@ -217,6 +230,7 @@
     var items = Core.bucket(pick.parsed.records, co.date, wd.days);
     state.items = items;
     state.error = '';
+    state.otherSheets = queuedOtherSheets;
     var sum = Core.summarize(items);
     renderInfo();
     renderStats(sum, items);
@@ -328,6 +342,7 @@
           return;
         }
         state.picked = pick.best;
+        queuedOtherSheets = Math.max(0, (pick.usableSheets || 1) - 1);
         state.sheetName = pick.best.name;
         $('fileInfo').textContent = f.name + ' · ' + pick.best.name;
         recompute();

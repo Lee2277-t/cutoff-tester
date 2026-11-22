@@ -71,11 +71,18 @@
 
   /* ---------------- 日期 ---------------- */
 
-  /** Excel 序列号 → {y,m,d}（1900 日期系统，含 1900-02-29 的历史 bug） */
-  function fromSerial(n) {
+  /** Excel 序列号 → {y,m,d}（1900 日期系统，含 1900-02-29 的历史 bug）
+   *  太小的小数（5、0.5 这种）不是日期，是日期列里混进来的数字，认不出更好。 */
+  var MIN_SERIAL = 25000; // 约 1968 年；再早的日期当读不出
+  function fromSerial(n, date1904) {
     if (!isFinite(n) || n <= 0 || n > 2958465) return null;
-    // Excel: 1 = 1900-01-01；60 是虚构的 1900-02-29
     var days = Math.floor(n);
+    if (days < MIN_SERIAL) return null;
+    if (date1904) {
+      // 1904 系统：序列号 0 = 1904-01-01（与 1900 系统相差 1462 天）
+      var d4 = new Date(Date.UTC(1904, 0, 1) + days * 86400000);
+      return { y: d4.getUTCFullYear(), m: d4.getUTCMonth() + 1, d: d4.getUTCDate() };
+    }
     if (days < 61) days += 1; // 补偿被 Excel 跳过的 1900-02-29
     var ms = (days - 1) * 86400000;
     var d = new Date(Date.UTC(1899, 11, 31) + ms + 0);
@@ -83,12 +90,12 @@
   }
 
   /** 各种写法 → {y,m,d}；认不出返回 null */
-  function parseDate(v) {
+  function parseDate(v, opts) {
     if (v === null || v === undefined || v === '') return null;
     if (v instanceof Date && !isNaN(v.getTime())) {
       return { y: v.getFullYear(), m: v.getMonth() + 1, d: v.getDate() };
     }
-    if (typeof v === 'number') return fromSerial(v);
+    if (typeof v === 'number') return fromSerial(v, opts && opts.date1904);
     var s = str(v).trim();
     if (!s) return null;
     // 纯数字的 8 位：20260115
@@ -102,7 +109,7 @@
   }
 
   function check(y, mo, d) {
-    if (!(y >= 1900 && y <= 2200)) return null;
+    if (!(y >= 1980 && y <= 2200)) return null;
     if (!(mo >= 1 && mo <= 12)) return null;
     var last = new Date(Date.UTC(y, mo, 0)).getUTCDate();
     if (!(d >= 1 && d <= last)) return null;
@@ -225,11 +232,15 @@
     return header;
   }
 
-  /** 合计行：整格就是合计/小计/总计/共计（可带「本页」「以上」和括号后缀） */
-  var TOTAL_CELL = /^(本页|本表|以上)?(合计|小计|总计|共计)(数|额)?$/;
+  /** 合计行：整格就是合计/小计/总计/共计（可带前缀和括号后缀）
+   *  单据式明细里常见「本单合计」「本月合计」「单据合计」，都要认——认不出就是金额翻倍。 */
+  var TOTAL_CELL = /^(本页|本表|以上|本单|本月|本期|本日|本季|本年|单据|累计|小计|明细)?(合计|小计|总计|共计|累计)(数|额|金额)?$/;
+  /** 只有短格才可能是标签，「摘要」里出现「合计」两个字的长句不算 */
   function isTotalRow(row) {
-    for (var c = 0; c < row.length && c < 4; c++) {
-      var v = norm(str(row[c]).replace(/[（(][^）)]*[）)]/g, ''));
+    for (var c = 0; c < row.length; c++) {
+      var raw = str(row[c]).trim();
+      if (!raw || raw.length > 8) continue;
+      var v = norm(raw.replace(/[（(][^）)]*[）)]/g, ''));
       if (v && TOTAL_CELL.test(v)) return true;
     }
     return false;
@@ -268,7 +279,7 @@
         continue;
       }
 
-      var d = parseDate(dateRaw);
+      var d = parseDate(dateRaw, { date1904: opts.date1904 });
       var cents = toCents(amtRaw);
 
       if (!d) {
@@ -427,6 +438,10 @@
     dateText: dateText,
     diffDays: diffDays,
     detectHeader: detectHeader,
+    date1904Of: function (wb) {
+      try { return !!(wb && wb.Workbook && wb.Workbook.WBProps && wb.Workbook.WBProps.date1904); }
+      catch (e) { return false; }
+    },
     parseRows: parseRows,
     bucket: bucket,
     summarize: summarize,
