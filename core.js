@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.6';
+  var VERSION = '0.2.0';
 
   /* ---------------- 基础 ---------------- */
 
@@ -155,7 +155,7 @@
   var DATE_WORDS = /日期|date|时间/;
   var AMOUNT_WORDS = /金额|价税合计|合计金额|总金额|amount/;
   var DOC_WORDS = /单据号|单号|凭证号|发票号|出库单|入库单|编号|no\.?$|单据统计号/;
-  var PARTY_WORDS = /客户|客商|供应商|供货单位|供货方|销货单位|销售方|购买方|购货方|购货单位|销售单位|对方单位|往来单位|往来户|结算单位|开票单位|提货单位|领用单位|使用单位|业务单位|收货单位|发货单位|公司名称|单位名称|单位简称|^单位$|名称/;
+  var PARTY_WORDS = /客户|客商|供应商|供货单位|供货方|销货单位|销售方|购买方|购货方|购货单位|销售单位|对方单位|往来单位|往来户|结算单位|开票单位|提货单位|领用单位|使用单位|业务单位|收货单位|发货单位|公司名称|单位名称|单位简称|名称/;
   // 「商品名称」「货物名称」是货物，不是往来单位——当成单位会让合计行看起来像业务行
   var GOODS_WORDS = /商品|货物|品名|产品|物资|存货|材料|物料|配件|备件|半成品|成品|原材料/;
   var SUMMARY_WORDS = /摘要|备注|说明|品名|货物名称|商品名称|事由|内容/;
@@ -320,11 +320,11 @@
         }
         // 单据级合计（本单合计 / 本行合计 / 单据合计）结束一张单据，累计要清零；
         // 期间级合计（本月合计 / 本年合计 / 总计 / 累计）不清零。
-        var isDocTotal = /本单|本行|本次|单据|明细|本页|本表|以上|^小计|小计$/.test(labelText) ||
-          !/月|年|季|日|总|累计/.test(labelText);
-        var refSum = isDocTotal ? detailCents : totalCents;
-        var nearSum = amount !== null && (Math.abs(amount.cents - refSum) <= 1 ||
-          Math.abs(amount.cents - detailCents) <= 1);
+        // 期间级：带月/年/季/日/总/累计，或以数字日期开头（2025-12合计、2025年12月合计）
+        var isPeriodTotal = /月|年|季|日|总|累计/.test(labelText) || /^[0-9]/.test(labelText);
+        var isDocTotal = !isPeriodTotal;
+        var nearSum = amount !== null && (Math.abs(amount.cents - detailCents) <= 1 ||
+          Math.abs(amount.cents - totalCents) <= 1);
         if (!party || nearSum) {
           skipped.push({ row: excelRow, reason: '合计行', raw: summary || party || docNo });
           if (isDocTotal) detailCents = 0;
