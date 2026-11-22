@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.5';
+  var VERSION = '0.1.6';
 
   /* ---------------- 基础 ---------------- */
 
@@ -155,12 +155,14 @@
   var DATE_WORDS = /日期|date|时间/;
   var AMOUNT_WORDS = /金额|价税合计|合计金额|总金额|amount/;
   var DOC_WORDS = /单据号|单号|凭证号|发票号|出库单|入库单|编号|no\.?$|单据统计号/;
-  var PARTY_WORDS = /客户|供应商|单位名称|往来单位|购货单位|销售单位|对方单位|户名|公司名称|名称/;
+  var PARTY_WORDS = /客户|客商|供应商|供货单位|供货方|销货单位|销售方|购买方|购货方|购货单位|销售单位|对方单位|往来单位|往来户|结算单位|开票单位|提货单位|领用单位|使用单位|业务单位|收货单位|发货单位|公司名称|单位名称|单位简称|^单位$|名称/;
   // 「商品名称」「货物名称」是货物，不是往来单位——当成单位会让合计行看起来像业务行
-  var GOODS_WORDS = /商品|货物|品名|产品|物资/;
+  var GOODS_WORDS = /商品|货物|品名|产品|物资|存货|材料|物料|配件|备件|半成品|成品|原材料/;
   var SUMMARY_WORDS = /摘要|备注|说明|品名|货物名称|商品名称|事由|内容/;
   // 出现这些词，说明这更可能是余额表/科目表，不是流水
   var BALANCE_WORDS = /余额|期初|期末|借方|贷方|累计/;
+  // 部门/项目/工程/成本中心 是内部维度，不是往来单位
+  var INTERNAL_WORDS = /部门|项目|工程|成本中心|利润中心|车间|科室/;
 
   function colScore(head, re) {
     var h = norm(head);
@@ -183,7 +185,7 @@
         if (colScore(h, DATE_WORDS)) cols.date.push(c);
         if (colScore(h, AMOUNT_WORDS)) cols.amount.push(c);
         if (colScore(h, DOC_WORDS)) cols.doc.push(c);
-        if (colScore(h, PARTY_WORDS) && !GOODS_WORDS.test(norm(h))) cols.party.push(c);
+        if (colScore(h, PARTY_WORDS) && !GOODS_WORDS.test(norm(h)) && !INTERNAL_WORDS.test(norm(h))) cols.party.push(c);
         if (colScore(h, SUMMARY_WORDS)) cols.summary.push(c);
       }
       if (cols.date.length && cols.amount.length) {
@@ -311,13 +313,21 @@
       //   标签像合计 且（本行没有往来单位 或 金额等于本段/全表累计） → 合计行
       //   标签像合计 但有往来单位、金额也对不上 → 业务行（摘要写着「合计」的真实业务）
       if (hasTotalLabel(row)) {
-        var isSub = hasSubtotalLabel(row);
-        var refSum = isSub ? detailCents : totalCents;
+        var labelText = '';
+        for (var lc = 0; lc < row.length; lc++) {
+          var lv = norm(str(row[lc]));
+          if (lv && TOTAL_CELL.test(str(row[lc]).replace(/[（(][^）)]*[）)]/g, ''))) { labelText = lv; break; }
+        }
+        // 单据级合计（本单合计 / 本行合计 / 单据合计）结束一张单据，累计要清零；
+        // 期间级合计（本月合计 / 本年合计 / 总计 / 累计）不清零。
+        var isDocTotal = /本单|本行|本次|单据|明细|本页|本表|以上|^小计|小计$/.test(labelText) ||
+          !/月|年|季|日|总|累计/.test(labelText);
+        var refSum = isDocTotal ? detailCents : totalCents;
         var nearSum = amount !== null && (Math.abs(amount.cents - refSum) <= 1 ||
           Math.abs(amount.cents - detailCents) <= 1);
         if (!party || nearSum) {
           skipped.push({ row: excelRow, reason: '合计行', raw: summary || party || docNo });
-          if (isSub) detailCents = 0;
+          if (isDocTotal) detailCents = 0;
           continue;
         }
       }

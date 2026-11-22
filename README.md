@@ -1,4 +1,4 @@
-# 截止测试助手 v0.1.5
+# 截止测试助手 v0.1.6
 
 把出入库单 / 发票 / 物流记录按资产负债表日切开，出**截止测试底稿**。
 
@@ -159,7 +159,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\pack.ps1
 
 ## 版本
 
-v0.1.5
+v0.1.6
 
 ## 许可
 
