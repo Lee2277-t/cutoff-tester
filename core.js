@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.0';
+  var VERSION = '0.1.2';
 
   /* ---------------- 基础 ---------------- */
 
@@ -32,15 +32,15 @@
       .toLowerCase();
   }
 
-  /** 金额 → 整数分。认不出返回 null（不猜） */
-  function toCents(v) {
-    if (v === null || v === undefined || v === '') return null;
-    if (typeof v === 'number') {
-      if (!isFinite(v)) return null;
-      return Math.round(v * 100);
-    }
+  function parseAmount(v) {
     var s = str(v).trim();
     if (!s) return null;
+    var exponent = 0;
+    if (typeof v === 'number') {
+      var scientific = s.split('e');
+      s = scientific[0];
+      exponent = Number(scientific[1] || 0);
+    }
     s = s.replace(/[¥￥$]/g, '').replace(/\s/g, '');
     // 全角括号 = 负数
     var neg = false;
@@ -51,11 +51,23 @@
       // 千分位必须每三位一组：12,34 这种不认
       return null;
     }
-    s = s.replace(/,/g, '');
-    var f = parseFloat(s);
-    if (!isFinite(f)) return null;
-    var cents = Math.round(f * 100);
-    return neg ? -cents : cents;
+    var parts = s.replace(/,/g, '').split('.');
+    var fraction = parts[1] || '';
+    var decimals = fraction.length - exponent;
+    var digits = parts[0] + fraction;
+    // 直接用十进制的第三位小数进位，1.005 和 -1.005 都进到 1.01 的绝对值。
+    var centEnd = digits.length - decimals + 2;
+    var length = Math.max(0, centEnd);
+    var cents = Number(digits.slice(0, length).padEnd(length, '0'));
+    if (centEnd >= 0 && digits.charAt(centEnd) >= '5') cents++;
+    if (!isFinite(cents)) return null;
+    return { cents: neg && cents ? -cents : cents, rounded: decimals > 2 };
+  }
+
+  /** 金额 → 整数分。认不出返回 null（不猜） */
+  function toCents(v) {
+    var amount = parseAmount(v);
+    return amount === null ? null : amount.cents;
   }
 
   function moneyText(cents) {
@@ -197,6 +209,7 @@
       problems: problems,
       rowIndex: best.rowIndex,
       dateCol: best.cols.date[0],
+      dateCols: best.cols.date,
       amountCol: best.cols.amount[0],
       docCol: best.cols.doc.length ? best.cols.doc[0] : -1,
       partyCol: best.cols.party.length ? best.cols.party[0] : -1,
@@ -235,11 +248,12 @@
   /** 合计行：整格就是合计/小计/总计/共计（可带前缀和括号后缀）
    *  单据式明细里常见「本单合计」「本月合计」「单据合计」，都要认——认不出就是金额翻倍。 */
   var TOTAL_CELL = /^(本页|本表|以上|本单|本月|本期|本日|本季|本年|单据|累计|小计|明细)?(合计|小计|总计|共计|累计)(数|额|金额)?$/;
-  /** 只有短格才可能是标签，「摘要」里出现「合计」两个字的长句不算 */
-  function isTotalRow(row) {
+  /** 有日期的行里，摘要、备注等说明栏的「合计」可以是业务原文。 */
+  function isTotalRow(row, heads, date) {
     for (var c = 0; c < row.length; c++) {
       var raw = str(row[c]).trim();
       if (!raw || raw.length > 8) continue;
+      if (date && raw === '合计' && /摘要|备注|说明|事由|内容/.test(norm(heads[c]))) continue;
       var v = norm(raw.replace(/[（(][^）)]*[）)]/g, ''));
       if (v && TOTAL_CELL.test(v)) return true;
     }
@@ -258,7 +272,10 @@
       return { records: [], skipped: [], problems: problems, badDates: 0, badAmounts: 0 };
     }
 
-    var badDates = 0, badAmounts = 0;
+    var badDates = 0, badAmounts = 0, roundedAmounts = 0;
+    var dateOpts = { date1904: opts.date1904 };
+    var otherDateCols = (header.dateCols || [header.dateCol]).slice(1);
+    var docCounts = new Map();
     for (var r = header.rowIndex + 1; r < rows.length; r++) {
       var row = rows[r] || [];
       var excelRow = firstExcelRow + r;
@@ -273,18 +290,30 @@
       for (var c = 0; c < row.length; c++) { if (str(row[c]).trim() !== '') { any = true; break; } }
       if (!any) continue;
 
+      var d = parseDate(dateRaw, dateOpts);
       // 合计行：不当成业务，也不当成「日期读不出」
-      if (isTotalRow(row)) {
+      if (isTotalRow(row, header.heads, d)) {
         skipped.push({ row: excelRow, reason: '合计行', raw: summary || party || docNo });
         continue;
       }
 
-      var d = parseDate(dateRaw, { date1904: opts.date1904 });
-      var cents = toCents(amtRaw);
+      for (var j = 0; j < otherDateCols.length; j++) {
+        var otherCol = otherDateCols[j];
+        var otherRaw = row[otherCol];
+        var otherDate = parseDate(otherRaw, dateOpts);
+        if (dateKey(d) !== dateKey(otherDate) || (!d && str(dateRaw).trim() !== str(otherRaw).trim())) {
+          problems.push('第 ' + excelRow + ' 行的日期列「' + header.dateHead + '」和「' +
+            str(header.heads[otherCol]) + '」日期值不同，分不清该用哪一列做截止测试。请只保留要测试的日期列。');
+          header.usable = false;
+          return { records: [], skipped: skipped, problems: problems, badDates: badDates, badAmounts: badAmounts };
+        }
+      }
+
+      var amount = parseAmount(amtRaw);
 
       if (!d) {
         badDates++;
-        if (str(dateRaw).trim() === '' && cents === null) {
+        if (str(dateRaw).trim() === '' && amount === null) {
           // 既没日期也没金额：多半是说明行、页脚
           skipped.push({ row: excelRow, reason: '说明行（无日期无金额）', raw: summary || party });
           continue;
@@ -292,12 +321,14 @@
         skipped.push({ row: excelRow, reason: '日期读不出', raw: str(dateRaw) + (summary ? ' · ' + summary : '') });
         continue;
       }
-      if (cents === null) {
+      if (amount === null) {
         badAmounts++;
         skipped.push({ row: excelRow, reason: '金额读不出', raw: str(amtRaw) + (summary ? ' · ' + summary : '') });
         continue;
       }
 
+      if (amount.rounded) roundedAmounts++;
+      if (docNo) docCounts.set(docNo, (docCounts.get(docNo) || 0) + 1);
       records.push({
         row: excelRow,
         date: d,
@@ -305,7 +336,7 @@
         docNo: docNo,
         party: party,
         summary: summary,
-        cents: cents
+        cents: amount.cents
       });
     }
 
@@ -314,6 +345,16 @@
     }
     if (badAmounts) {
       problems.push('有 ' + badAmounts + ' 行金额读不出（见「读取情况」），这几行没有算进截止测试。');
+    }
+    if (roundedAmounts) {
+      problems.push('有 ' + roundedAmounts + ' 行金额是三位以上小数，已按四舍五入到分。');
+    }
+    var duplicates = [];
+    docCounts.forEach(function (count, docNo) {
+      if (count > 1) duplicates.push(docNo + ' 出现 ' + count + ' 次');
+    });
+    if (duplicates.length) {
+      problems.push('有 ' + duplicates.length + ' 个单据号重复出现（如 ' + duplicates[0] + '），请确认是不是重复粘贴。');
     }
     if (records.length && badDates > records.length) {
       problems.push('读不出日期的行比读出来的还多，这张表可能不适合做截止测试。');

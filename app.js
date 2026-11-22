@@ -16,7 +16,6 @@
     otherSheets: 0,
     error: ''
   };
-  var queuedOtherSheets = 0;
 
   function $(id) { return document.getElementById(id); }
   function esc(s) {
@@ -50,8 +49,8 @@
   }
 
   /** 逐张试，按「读出的记录数」挑最像流水的那张 */
-  function pickSheet(wb) {
-    var best = null, why = '', emptyCount = 0, usableCount = 0;
+  function pickSheet(wb, csvRows) {
+    var best = null, why = '', parseWhy = '', usableCount = 0;
     wb.SheetNames.forEach(function (name) {
       var rows = sheetRows(wb, name);
       var header = Core.detectHeader(rows, name);
@@ -59,14 +58,21 @@
         if (!why && header.problems.length) why = header.problems.join('；');
         return;
       }
+      if (csvRows) {
+        var columns = csvRows[header.rowIndex].columns;
+        for (var r = header.rowIndex + 1; r < csvRows.length; r++) {
+          if (csvRows[r].columns <= columns) continue;
+          parseWhy = '第 ' + csvRows[r].line + ' 行列数比表头多，可能有逗号没加引号。';
+          return;
+        }
+      }
       var parsed = Core.parseRows(rows, header, { firstExcelRow: sheetOrigin(wb, name) + 1, date1904: Core.date1904Of(wb) });
-      if (!parsed.records.length) { emptyCount++; if (!why) why = parsed.problems.join('；'); return; }
+      if (!header.usable) { if (!parseWhy) parseWhy = parsed.problems.join('；'); return; }
       usableCount++;
       var cand = { name: name, header: header, parsed: parsed, rows: rows, origin: sheetOrigin(wb, name) };
       if (!best || cand.parsed.records.length > best.parsed.records.length) best = cand;
     });
-    if (!best && !why && emptyCount) why = '表里没有读到「日期 + 金额」都齐全的行。';
-    return { best: best, why: why, usableSheets: usableCount };
+    return { best: best, why: parseWhy || why, usableSheets: usableCount };
   }
 
   function decodeCsv(buf) {
@@ -81,16 +87,63 @@
     }
   }
 
+  function csvSeparator(text) {
+    // 沿用 SheetJS 的自动分隔符顺序。显式 sep= 声明在 csvLayout 里优先处理。
+    var counts = { ',': 0, '\t': 0, ';': 0, '|': 0 };
+    var quoted = false;
+    for (var i = 0; i < Math.min(1024, text.length); i++) {
+      var ch = text.charAt(i);
+      if (ch === '"') quoted = !quoted;
+      else if (!quoted && counts[ch] !== undefined) counts[ch]++;
+    }
+    return Object.keys(counts).reduce(function (best, ch) {
+      return counts[ch] > counts[best] ? ch : best;
+    }, ',');
+  }
+
+  function csvLayout(text) {
+    var directive = /^sep=(.)(?:\r\n|\r|\n)/.exec(text);
+    var sep = directive ? directive[1] : csvSeparator(text);
+    var start = directive ? directive[0].length : 0;
+    var line = directive ? 2 : 1;
+    var rowLine = line, fieldStart = start, columns = 1, quoted = false;
+    var rows = [];
+    // 工作表会丢掉空字段，CSV 列数和原始行号需要从源文本保留。
+    for (var i = start; i < text.length; i++) {
+      var ch = text.charAt(i);
+      if (ch === '"' && text.charAt(fieldStart) === '"') quoted = !quoted;
+      else if (!quoted && ch === sep) { columns++; fieldStart = i + 1; }
+      else if (ch === '\r' || ch === '\n') {
+        if (ch === '\r' && text.charAt(i + 1) === '\n') i++;
+        line++;
+        if (!quoted) {
+          rows.push({ line: rowLine, columns: columns });
+          rowLine = line;
+          fieldStart = i + 1;
+          columns = 1;
+        }
+      }
+    }
+    rows.push({ line: rowLine, columns: columns });
+    return { separator: sep, rows: rows };
+  }
+
   function readWorkbook(file) {
     return new Promise(function (resolve) {
       var reader = new FileReader();
       var isCsv = /\.csv$/i.test(file.name || '');
       reader.onload = function () {
         try {
-          var wb = isCsv
-            ? XLSX.read(decodeCsv(reader.result), { type: 'string', cellDates: false })
-            : XLSX.read(new Uint8Array(reader.result), { type: 'array', cellDates: false });
-          resolve({ ok: true, wb: wb, fileName: file.name });
+          var wb, csvRows;
+          if (isCsv) {
+            var text = decodeCsv(reader.result);
+            var layout = csvLayout(text);
+            wb = XLSX.read(text, { type: 'string', cellDates: false, FS: layout.separator });
+            csvRows = layout.rows;
+          } else {
+            wb = XLSX.read(new Uint8Array(reader.result), { type: 'array', cellDates: false });
+          }
+          resolve({ ok: true, wb: wb, fileName: file.name, csvRows: csvRows });
         } catch (e) {
           resolve({ ok: false, error: e.message });
         }
@@ -230,7 +283,6 @@
     var items = Core.bucket(pick.parsed.records, co.date, wd.days);
     state.items = items;
     state.error = '';
-    state.otherSheets = queuedOtherSheets;
     var sum = Core.summarize(items);
     renderInfo();
     renderStats(sum, items);
@@ -251,7 +303,12 @@
     rows.push(['截止测试控制表']);
     rows.push(['被审计单位', client, '', '截止日', Core.dateText(co.date), '', '窗口', '±' + wd.days + ' 天']);
     rows.push(['数据来源', state.fileName, '', '工作表', state.sheetName]);
-    rows.push([]);
+    var scope = [];
+    if (state.wb && state.wb.SheetNames.length > 1) {
+      scope.push('本表只包含工作表「' + state.sheetName + '」的数据' +
+        (state.otherSheets ? '；工作簿另有 ' + state.otherSheets + ' 张可用表未参与' : '') + '。');
+    }
+    rows.push(scope);
     var sumLine = ['汇总', '', '本期 ' + sum.before.n + ' 笔 / ' + money(sum.before.cents),
       '下期 ' + sum.after.n + ' 笔 / ' + money(sum.after.cents),
       '临近期末 ' + sum.near.n + ' 笔 / ' + money(sum.near.cents),
@@ -267,7 +324,16 @@
     // 合计行：用公式，别人改数字会自动重算
     rows.push(['合计', '', '', '', '', '', '', '', '', null, '', '', '', '']);
     var totalRow = rows.length;
-    rows[totalRow - 1][9] = { t: 'n', f: 'SUM(J' + (headRow + 1) + ':J' + lastData + ')' };
+    rows[totalRow - 1][9] = { t: 'n', f: 'SUM(J' + (headRow + 1) + ':J' + lastData + ')', v: sum.total.cents / 100 };
+
+    rows.push([], [], ['读取情况']);
+    state.parsed.problems.forEach(function (problem) { rows.push(['说明', problem]); });
+    if (state.parsed.skipped.length) {
+      rows.push(['原表行', '排除原因']);
+      state.parsed.skipped.forEach(function (s) { rows.push([s.row, s.reason]); });
+    } else {
+      rows.push(['无排除行']);
+    }
 
     var ws = XLSX.utils.aoa_to_sheet(rows);
     ws['!cols'] = [
@@ -280,7 +346,11 @@
   }
 
   function exportXlsx() {
-    var co = readCutOff(), wd = readWindow();
+    if (!state.items.length) {
+      $('genInfo').textContent = '没有可导出的记录，请先读取有效数据。';
+      return;
+    }
+    var co = readCutOff();
     var client = String($('clientName').value || '').trim() || '被审计单位';
     var built = buildSheet();
     var wb = XLSX.utils.book_new();
@@ -306,6 +376,7 @@
     state.fileName = '示例-销售出库单';
     state.sheetName = '出库单';
     state.wb = null;
+    state.otherSheets = 0;
     $('fileInfo').textContent = '示例数据（虚构）';
     $('clientName').value = '示例被审计单位';
     $('cutOff').value = '2025-12-31';
@@ -324,6 +395,7 @@
       state.error = '';
       $('fileInfo').textContent = '正在读 ' + f.name + ' …';
       readWorkbook(f).then(function (res) {
+        state.otherSheets = 0;
         if (!res.ok) {
           state.error = '文件读不了：' + res.error;
           state.picked = null;
@@ -333,7 +405,7 @@
         }
         state.wb = res.wb;
         state.fileName = res.fileName;
-        var pick = pickSheet(res.wb);
+        var pick = pickSheet(res.wb, res.csvRows);
         if (!pick.best) {
           state.picked = null;
           state.error = pick.why || '这张工作簿里没有能做出入库流水的表。';
@@ -342,7 +414,7 @@
           return;
         }
         state.picked = pick.best;
-        queuedOtherSheets = Math.max(0, (pick.usableSheets || 1) - 1);
+        state.otherSheets = pick.usableSheets - 1;
         state.sheetName = pick.best.name;
         $('fileInfo').textContent = f.name + ' · ' + pick.best.name;
         recompute();

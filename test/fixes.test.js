@@ -3,6 +3,7 @@
  */
 const path = require('path');
 const Core = require(path.join(__dirname, '..', 'core.js'));
+const { createApp, XLSX } = require('./app-fixture');
 
 let pass = 0, fail = [];
 function ok(cond, msg) { if (cond) pass++; else fail.push(msg); }
@@ -172,10 +173,139 @@ console.log('\n[负数与冲销]');
   eq(s.before.cents, 0, '一正一负相抵为 0');
 }
 
-console.log('\n============================================================');
-if (fail.length) {
-  console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
-  fail.forEach((m, i) => console.log('  ' + (i + 1) + '. ' + m));
-  process.exit(1);
+console.log('\n[摘要恰好是合计]');
+{
+  const { p } = parse([
+    ['日期', '单据号', '商品名称', '数量', '单价', '金额', '摘要'],
+    ['2025-12-30', 'A', '零件', 1, 100, 100, '合计'],
+    ['2025-12-30', 'A', '本单合计', 1, null, 100],
+    [null, null, null, null, null, 100, '合计']
+  ]);
+  eq(p.records.length, 1, '保留摘要写「合计」的业务');
+  eq(p.records[0]?.cents, 10000, '摘要写「合计」的业务金额仍参与计算');
+  eq(p.skipped.map(s => s.row).join(','), '3,4', '只排除本单合计和无日期的合计');
 }
-console.log('真实表格边界全部通过：' + pass + ' 项断言');
+
+console.log('\n[日期格式边界和日期系统]');
+{
+  eq(Core.parseDate('1979-12-31'), null, '文本年份 1979 拒绝');
+  eq(Core.dateText(Core.parseDate('1980-01-01')), '1980-01-01', '文本年份从 1980 起接受');
+  eq(Core.parseDate(24999), null, 'Excel 序列号 24999 拒绝');
+  eq(Core.dateText(Core.parseDate(25000)), '1968-06-11', 'Excel 序列号从 25000 起接受');
+  eq(Core.dateText(Core.parseDate(46022.5)), '2025-12-31', '1900 系统序列号保留日期部分');
+  eq(Core.dateText(Core.parseDate(44560.5, { date1904: true })), '2025-12-31', '1904 系统补 1462 天');
+}
+
+console.log('\n[多列日期按原表行比较]');
+{
+  const rows = [
+    ['日期', '记账日期', '单据号', '金额'],
+    ['2025/12/31', 46022.5, 'A', 100],
+    ['2026-01-01', '20260101', 'B', 200]
+  ];
+  const same = parse(rows);
+  eq(same.p.records.map(r => r.dateText).join(','), '2025-12-31,2026-01-01', '日期格式不同但日历日期完全一致时接受');
+  for (const value of ['2025-12-30', null]) {
+    const different = [
+      ...rows.slice(0, 2),
+      ['2026-01-05', value, 'B', 200]
+    ];
+    const header = Core.detectHeader(different, 'x');
+    const p = Core.parseRows(different, header, { firstExcelRow: 5 });
+    eq(header.usable, false, '日期不同或一列缺失时拒绝');
+    eq(p.records.length, 0, '日期冲突时没有部分结果');
+    ok(/第 7 行.*「日期」.*「记账日期」.*日期值不同/.test(p.problems.join('')), '指出原表行号和两个列名');
+  }
+}
+
+console.log('\n[重复单据与三位以上小数]');
+{
+  const { p } = parse([
+    ['日期', '单据号', '金额'],
+    ['2025-12-30', 'XS-2025-001', '1,234.567'],
+    ['2025-12-30', 'XS-2025-001', 1.005],
+    ['2025-12-30', 'XS-2025-002', -1.005],
+    ['2025-12-31', 'XS-2025-002', '（1.2345）'],
+    ['2025-12-31', '', 1e-7],
+    ['2025-12-31', '', 1.01]
+  ]);
+  eq(p.records.map(r => r.cents).join(','), '123457,101,-101,-123,0,101', '逐笔按十进制四舍五入到分');
+  ok(p.problems.some(s => /有 5 行金额是三位以上小数，已按四舍五入到分/.test(s)), '小数位数提示含科学计数法数值');
+  ok(p.problems.some(s => /有 2 个单据号重复出现（如 XS-2025-001 出现 2 次），请确认是不是重复粘贴/.test(s)),
+    '按不同的重复单据号计数，空单据号不计，保留全部六笔');
+}
+
+(async function () {
+  const fixture = createApp();
+  const { el, fire, loadFile, loadWorkbook, loadCsv, app } = fixture;
+  const table = wb => XLSX.utils.sheet_to_json(wb.Sheets['截止测试'], { header: 1, defval: null });
+  const head = ['日期', '单据号', '客户', '金额'];
+  const a = ['2025-12-30', 'XS-2025-001', '华远', 1000];
+  const b = ['2026-01-01', 'XS-2025-001', '华远', -1000];
+
+  console.log('\n[底稿读取情况和缓存值]');
+  await loadFile([
+    head, a, [null, null, '页脚'], ['错日期', 'B', '华远', 200],
+    ['2026-01-01', 'C', '华远', '待补'], ['合计', null, null, 0], b
+  ]);
+  fire('genBtn', 'click');
+  const wb = fixture.readExport({ bookFiles: true });
+  const grid = table(wb);
+  const total = grid.findIndex(row => row[0] === '合计');
+  const section = grid.findIndex(row => row[0] === '读取情况');
+  eq(wb.SheetNames.join(','), '截止测试', '读取情况与控制表在同一张工作表');
+  eq(section, total + 3, '读取情况与合计之间空两行');
+  ok(grid.slice(total + 1, total + 3).flat().every(cell => cell === null), '中间两行无内容');
+  eq(
+    JSON.stringify(grid.slice(section + 1).filter(row => typeof row[0] === 'number').map(row => row.slice(0, 2))),
+    JSON.stringify([[3, '说明行（无日期无金额）'], [4, '日期读不出'], [5, '金额读不出'], [6, '合计行']]),
+    '底稿列出每条排除项的原表行号和原因'
+  );
+  ok(grid.slice(section + 1).some(row => row[0] === '说明' && /单据号重复出现/.test(row[1])), '重复单据提示写进同表说明区');
+  const totalCell = wb.Sheets['截止测试']['J' + (total + 1)];
+  eq(totalCell.f, 'SUM(J8:J9)', '保留合计公式且公式只覆盖明细');
+  eq(totalCell.v, 0, '零合计也有数值缓存');
+  const xml = Buffer.from(wb.files['xl/worksheets/sheet1.xml'].content).toString();
+  ok(xml.includes('<f>SUM(J8:J9)</f><v>0</v>'), '实际写出的 XLSX XML 同时含公式和缓存值');
+
+  console.log('\n[无记录时直接调用导出]');
+  await loadFile([head]);
+  app.exportXlsx();
+  ok(fixture.written === null, '空结果直接调用也不会写底稿');
+  ok(/没有可导出的记录/.test(el('genInfo').textContent), '直接导出空结果时有提示');
+
+  console.log('\n[CSV 带引号换行、空字段与原始行号]');
+  const csv = '日期,单据号,客户,金额,摘要\r\n' +
+    '2025-12-30,A,"华远, ""一部""\r\n二组","1,234.56",';
+  await loadCsv(csv);
+  fire('genBtn', 'click');
+  const csvGrid = table(fixture.readExport());
+  eq(csvGrid[7][7].replace(/\r\n/g, '\n'), '华远, "一部"\n二组', '引用字段内的逗号、引号和换行保留');
+  eq(csvGrid[7][9], 1234.56, '带引号的千分位金额正常导出');
+  await loadCsv(csv + '\r\n2025-12-31,B,东方,200,,');
+  eq(el('genBtn').disabled, true, '连空的超出列也拒绝');
+  ok(/第 4 行列数比表头多/.test(el('readInfo').innerHTML), '多行引用字段之后仍报源文件行号');
+  await loadCsv('sep=;\r\n日期;单据号;客户;金额\r\n2025-12-30;A;华远;1,234.56');
+  eq(el('genBtn').disabled, false, 'Excel 的 sep 声明仍可用');
+
+  console.log('\n[工作表范围写进抬头]');
+  const months = XLSX.utils.book_new();
+  for (let i = 1; i <= 12; i++) {
+    XLSX.utils.book_append_sheet(months, XLSX.utils.aoa_to_sheet(i === 12 ? [head, a, b] : [head, a]), i + '月');
+  }
+  XLSX.utils.book_append_sheet(months, XLSX.utils.aoa_to_sheet([['封面']]), '封面');
+  await loadWorkbook(months);
+  fire('genBtn', 'click');
+  const monthGrid = table(fixture.readExport());
+  const headIndex = monthGrid.findIndex(row => row[0] === '序号');
+  ok(monthGrid.slice(0, headIndex).flat().includes('本表只包含工作表「12月」的数据；工作簿另有 11 张可用表未参与。'),
+    '抬头点明 12 月和未参与的 11 张可用表，不计封面');
+
+  console.log('\n============================================================');
+  if (fail.length) {
+    console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
+    fail.forEach((m, i) => console.log('  ' + (i + 1) + '. ' + m));
+    process.exit(1);
+  }
+  console.log('真实表格边界全部通过：' + pass + ' 项断言');
+})().catch(err => { console.error(err); process.exitCode = 1; });
