@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.3';
+  var VERSION = '0.1.4';
 
   /* ---------------- 基础 ---------------- */
 
@@ -248,19 +248,10 @@
     return header;
   }
 
-  /** 合计行：整格就是合计/小计/总计/共计（可带前缀和括号后缀）
-   *  单据式明细里常见「本单合计」「本月合计」「单据合计」，都要认——认不出就是金额翻倍。 */
-  var TOTAL_CELL = /^(本页|本表|以上|本单|本月|本期|本日|本季|本年|单据|累计|小计|明细|\d{4}年\d{1,2}月|\d{1,2}月|\d{4}-\d{1,2})?(合计|小计|总计|共计|累计)(数|额|金额|不含税|含税|价税合计|未税|税额)?$/;
-  /** 有日期的行里，摘要、备注等说明栏的「合计」可以是业务原文。 */
-  function isTotalRow(row, heads, date) {
+  var TOTAL_CELL = /^(?:(?:本页|本表|以上|本单|本月|本期|本日|本季|本年|本行|本次|单据|明细|价税|金额|不含税|税额|总|\d{4}年\d{1,2}月|\d{4}-\d{1,2}|\d{1,2}月)?(?:合计|小计|总计|共计|累计)(?:数|额|金额|不含税|含税|价税合计|未税|税额|人民币|大写|小写)?|total|subtotal)$/;
+  function hasTotalLabel(row) {
     for (var c = 0; c < row.length; c++) {
-      var raw = str(row[c]).trim();
-      if (!raw) continue;
-      var v = norm(raw);
-      if (date && v === '合计' && /摘要|备注|说明|事由|内容/.test(norm(heads[c]))) continue;
-      if (TOTAL_CELL.test(v)) return true;
-      // 兼容原先能识别的短标签，如「合计（元）」。
-      if (raw.length <= 8 && TOTAL_CELL.test(norm(raw.replace(/[（(][^）)]*[）)]/g, '')))) return true;
+      if (TOTAL_CELL.test(norm(row[c]))) return true;
     }
     return false;
   }
@@ -277,7 +268,7 @@
       return { records: [], skipped: [], problems: problems, badDates: 0, badAmounts: 0 };
     }
 
-    var badDates = 0, badAmounts = 0, roundedAmounts = 0;
+    var badDates = 0, badAmounts = 0, roundedAmounts = 0, detailCents = 0;
     var dateOpts = { date1904: opts.date1904 };
     var otherDateCols = (header.dateCols || [header.dateCol]).slice(1);
     var detailCounts = new Map(), duplicateDocs = new Map();
@@ -295,13 +286,15 @@
       for (var c = 0; c < row.length; c++) { if (str(row[c]).trim() !== '') { any = true; break; } }
       if (!any) continue;
 
-      var d = parseDate(dateRaw, dateOpts);
-      // 合计行：不当成业务，也不当成「日期读不出」
-      if (isTotalRow(row, header.heads, d)) {
+      var amount = parseAmount(amtRaw);
+      // 带单据号的合计标签只有与本段明细之和相差至多一分时才排除。
+      if (hasTotalLabel(row) && (!docNo || (amount !== null && Math.abs(amount.cents - detailCents) <= 1))) {
         skipped.push({ row: excelRow, reason: '合计行', raw: summary || party || docNo });
+        detailCents = 0;
         continue;
       }
 
+      var d = parseDate(dateRaw, dateOpts);
       for (var j = 0; j < otherDateCols.length; j++) {
         var otherCol = otherDateCols[j];
         var otherRaw = row[otherCol];
@@ -313,8 +306,6 @@
           return { records: [], skipped: skipped, problems: problems, badDates: badDates, badAmounts: badAmounts };
         }
       }
-
-      var amount = parseAmount(amtRaw);
 
       if (!d) {
         badDates++;
@@ -333,6 +324,7 @@
       }
 
       if (amount.rounded) roundedAmounts++;
+      detailCents += amount.cents;
       var dateLabel = dateText(d);
       if (docNo) {
         var key = JSON.stringify([docNo, dateLabel, amount.exact, party]);

@@ -67,12 +67,9 @@
         var layout = csvRows[headerRow];
         for (var r = headerRow + 1; r < csvRows.length; r++) {
           var row = csvRows[r];
-          // 短行只允许省掉无列名的尾部空字段，有列名的空值仍需保留分隔符。
-          var mismatch = row.columns < layout.columns
-            ? row.columns < layout.filledColumns || row.filledColumns > layout.filledColumns
-            : row.filledColumns > layout.columns;
-          if (!row.filledColumns || !mismatch) continue;
-          parseWhy = '第 ' + row.line + ' 行列数和表头不一致。常见原因是千分位或文本里的逗号没加引号，' +
+          if (row.columns === layout.columns) continue;
+          parseWhy = '第 ' + row.line + ' 行列数和表头不一致（该行 ' + row.columns + ' 个字段，表头 ' +
+            layout.columns + ' 个字段）。常见原因是千分位或文本里的逗号没加引号，' +
             '请给含逗号的内容加上双引号，并保留空列的分隔符。';
           return;
         }
@@ -122,39 +119,31 @@
     var sep = directive ? directive[1] : csvSeparator(text);
     var start = directive ? directive[0].length : 0;
     var line = directive ? 2 : 1;
-    var rowLine = line, fieldStart = start, columns = 1, filledColumns = 0, quoted = false;
+    var rowLine = line, rowStart = start, fieldStart = start, columns = 1, quoted = false;
     var rows = [];
-    function finishField(end) {
-      var field = text.slice(fieldStart, end).trim();
-      if (field && field !== '""') filledColumns = columns;
-    }
-    function finishRow(end) {
-      finishField(end);
-      rows.push({ line: rowLine, columns: columns, filledColumns: filledColumns });
+    function finishRow() {
+      rows.push({ line: rowLine, columns: columns });
     }
     // 工作表会丢掉空字段，CSV 列数和原始行号需要从源文本保留。
     for (var i = start; i < text.length; i++) {
       var ch = text.charAt(i);
       if (ch === '"' && text.charAt(fieldStart) === '"') quoted = !quoted;
       else if (!quoted && ch === sep) {
-        finishField(i);
         columns++;
         fieldStart = i + 1;
       }
       else if (ch === '\r' || ch === '\n') {
-        var end = i;
         if (ch === '\r' && text.charAt(i + 1) === '\n') i++;
         line++;
         if (!quoted) {
-          finishRow(end);
+          finishRow();
           rowLine = line;
-          fieldStart = i + 1;
+          fieldStart = rowStart = i + 1;
           columns = 1;
-          filledColumns = 0;
         }
       }
     }
-    finishRow(text.length);
+    if (rowStart < text.length) finishRow();
     return { separator: sep, rows: rows };
   }
 

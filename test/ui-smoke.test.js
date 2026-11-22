@@ -206,6 +206,27 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   ok(didNotExport && fixture.readExport()?.Sheets['截止测试'].J10?.v === 1734.56,
     'B2：拒绝错误底稿；加金额引号并保留空字段后可导出 1,734.56');
 
+  console.log('\n[第三轮 · CSV 字段数必须与表头完全一致]');
+  const fieldHead = '日期,单据号,客户,金额,备注';
+  await loadCsv([fieldHead, '2025-12-30,A,华远,500,', '2025-12-31,B,东方,1,234.56,'].join('\r\n'));
+  ok(el('genBtn').disabled && /第 3 行列数和表头不一致（该行 6 个字段，表头 5 个字段）.*千分位或文本里的逗号没加引号/.test(el('readInfo').innerHTML),
+    '第三轮：尾列为空也能发现第 3 行有 6 个字段而表头有 5 个');
+  fire('genBtn', 'click');
+  ok(fixture.written === null && el('statBox').innerHTML === '', '第三轮：超宽记录导致整表拒绝，没有部分结果或底稿');
+
+  const fiveLines = [fieldHead, '2025-12-30,A,华远,"128,000.00",', '2025-12-30,B,东方,128,123.45,',
+    '2025-12-31,C,华远,65,234.56,', '2025-12-31,D,东方,1,234.56,'];
+  await loadCsv(fiveLines.join('\r\n'));
+  fire('genBtn', 'click');
+  const unquotedExport = fixture.readExport();
+  ok(el('genBtn').disabled && /第 3 行列数和表头不一致/.test(el('readInfo').innerHTML) && !unquotedExport,
+    '第三轮：五行 CSV 拒绝生成 128,194.00' + (unquotedExport ? '，实际导出 ' + unquotedExport.Sheets['截止测试'].J12?.v : ''));
+  const corrected = fiveLines.map((line, i) => i < 2 ? line : line.replace(/(\d+,\d{3}\.\d{2}),$/, '"$1",'));
+  await loadCsv(corrected.join('\r\n'));
+  fire('genBtn', 'click');
+  ok(!unquotedExport && fixture.readExport()?.Sheets['截止测试'].J12?.v === 322592.57,
+    '第三轮：错列整表拒绝；补上引号后四笔全部计入，尾部空字段和无末尾换行仍可读');
+
   console.log('\n[多工作表生成与切换示例]');
   const months = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(months, XLSX.utils.aoa_to_sheet([head, a]), '11月');

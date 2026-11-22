@@ -295,6 +295,57 @@ console.log('\n[重复单据与三位以上小数]');
       JSON.stringify([['零件', 500], [description, 200]]), 'B1：排除「' + label + '」并保留括号内有长说明的业务');
   }
 
+  console.log('\n[第三轮 · 合计标签和单据号]');
+  const reviewHead = [...head, '摘要'];
+  await loadFile([
+    reviewHead,
+    ['2025-12-30', 'A', '华远', 1000, '合计'],
+    ['2025-12-31', 'B', '东方', 200, '合计：不含税'],
+    ['2025-12-31', 'C', '华远', 300, '销售出库'],
+    ['2025-12-31', '', '', 300, '合 计'],
+    ['2025-12-31', '', '', 300, '合计：']
+  ]);
+  ok(/3 笔 \/ 1,500\.00/.test(el('statBox').innerHTML), '第三轮：有单据号的三笔业务计入预览');
+  fire('genBtn', 'click');
+  const reviewWb = fixture.readExport();
+  const reviewGrid = table(reviewWb);
+  eq(reviewGrid.filter(row => typeof row[9] === 'number' && typeof row[0] === 'number').map(row => row[6]).join(','),
+    'A,B,C', '第三轮：底稿保留摘要恰好是合计标签的业务，排除单据号为空的同类行');
+  eq(reviewGrid.filter(row => row[1] === '合计行').map(row => row[0]).join(','), '5,6',
+    '第三轮：「合 计」和「合计：」出现在读取情况中');
+
+  const taxHead = ['日期', '单据号', '商品名称', '数量', '金额'];
+  await loadFile([
+    taxHead,
+    ['2025-12-31', 'FA-1', '商品', 1, 1500],
+    ['2025-12-31', 'FA-1', '价税合计', null, 1695],
+    ['2025-12-31', 'FA-1', 'SubTotal', null, 3195.01],
+    ['2025-12-31', 'FA-2', '商品', 1, -50],
+    ['2025-12-31', 'FA-2', '价税合计', null, -50.02],
+    ['2025-12-31', 'FA-2', '本次合计', null, -100.03],
+    ['2025-12-31', '', '价税合计', null, 1695],
+    ['2025-12-31', '', '2025年12月合计', '', 1000],
+    ['2025-12-31', '', 'Total', '', 1000],
+    ['2025-12-31', 'FA-3', '商品', 1, 20],
+    ['2025-12-31', '　', '（本行共计人民币）', null, 999],
+    ['2025-12-31', 'FA-4', '商品', 1, 5],
+    ['2025-12-31', 'FA-4', '总合计（小写）', null, 5]
+  ]);
+  fire('genBtn', 'click');
+  const taxWb = fixture.readExport();
+  const taxGrid = table(taxWb);
+  const taxTotal = taxWb.Sheets['截止测试']['J' + (taxGrid.findIndex(row => row[0] === '合计') + 1)];
+  eq(taxTotal.v, 3119.98, '第三轮：有单据号的价税合计 1695 和相差两分的 -50.02 均计入，底稿合计 3,119.98');
+  eq(taxTotal.f, 'SUM(J8:J13)', '第三轮：底稿合计公式覆盖六笔业务');
+  eq(taxGrid.filter(row => row[1] === '合计行').map(row => row[0]).join(','), '4,7,8,9,10,12,14',
+    '第三轮：一分容差双向包含，且每次排除合计行后重新累计');
+
+  const businessLabels = ['销售出库合计', '合计（按合同约定分批交付）', '合计（元）', '累计合计', '小计合计', 'Total额'];
+  await loadFile([reviewHead, ...businessLabels.map(label => ['2025-12-31', '', '华远', 100, label])]);
+  fire('genBtn', 'click');
+  eq(table(fixture.readExport()).filter(row => typeof row[9] === 'number' && typeof row[0] === 'number').map(row => row[8]).join(','),
+    businessLabels.join(','), '第三轮：长句和标签族以外的整格写法仍计入业务');
+
   console.log('\n[N1 · 同号明细与疑似重复粘贴]');
   const pasted = ['2025-12-30', 'DUP-001', '华远', '1,234.560'];
   await loadFile([
@@ -327,14 +378,32 @@ console.log('\n[重复单据与三位以上小数]');
   eq(el('genBtn').disabled, true, '超出的非空列拒绝');
   ok(/第 4 行列数和表头不一致/.test(el('readInfo').innerHTML), '多行引用字段之后仍报源文件行号');
   await loadCsv(csv + '\r\n2025-12-31,B,东方,200,,""\r\n,,,,,,');
+  ok(el('genBtn').disabled && /第 4 行列数和表头不一致/.test(el('readInfo').innerHTML), '第三轮：多出的空字段也计入字段总数');
+  await loadCsv('\ufeff' + csv + '\r\n,,,,\r\n2025-12-31,B, 东方 , 200 ,\r\n');
   fire('genBtn', 'click');
   const padded = fixture.readExport();
-  eq(padded && table(padded).find(row => row[0] === '合计')[9], 1434.56, 'B2：多出的空字段和空行不影响 CSV 合计');
+  eq(padded && table(padded).find(row => row[0] === '合计')[9], 1434.56, 'B2：BOM、字段空格、等宽空行及尾部空字段仍可读');
   await loadCsv('日期,单据号,客户,金额,,\r\n2025-12-30,A,东方,200\r\n2025-12-31,B,东方,500,备注');
-  ok(el('genBtn').disabled && /第 3 行列数和表头不一致/.test(el('readInfo').innerHTML),
-    'B2：缺失未命名尾列的第 2 行可读，第 3 行缺列时有内容则不能当作空字段放行');
+  ok(el('genBtn').disabled && /第 2 行列数和表头不一致/.test(el('readInfo').innerHTML), '第三轮：缺失未命名尾列的第 2 行也拒绝');
+  await loadCsv('日期,单据号,客户,金额,,\r\n2025-12-30,A,东方,200,,\r\n2025-12-31,B,东方,500,备注');
+  ok(el('genBtn').disabled && /第 3 行列数和表头不一致/.test(el('readInfo').innerHTML), 'B2：第 2 行补齐后，仍会拒绝缺列的第 3 行');
   await loadCsv('sep=;\r\n日期;单据号;客户;金额\r\n2025-12-30;A;华远;1,234.56');
   eq(el('genBtn').disabled, false, 'Excel 的 sep 声明仍可用');
+
+  const gbkCsv = Buffer.concat([
+    Buffer.from('sep=;\r\n'),
+    Buffer.from('c8d5c6da3bb5a5beddbac53bbfcdbba73bbdf0b6ee3bd5aab2aa', 'hex'), // 日期;单据号;客户;金额;摘要
+    Buffer.from('\r\n2025-12-30;A;'),
+    Buffer.from('bbaad4b6', 'hex'), // 华远
+    Buffer.from(';1,234.56;')
+  ]);
+  await loadCsv(gbkCsv);
+  fire('genBtn', 'click');
+  const gbk = fixture.readExport();
+  await loadCsv(Buffer.concat([gbkCsv, Buffer.from(';')]));
+  ok(gbk && table(gbk)[7][7] === '华远' && table(gbk)[7][9] === 1234.56 &&
+    el('genBtn').disabled && /第 3 行列数和表头不一致/.test(el('readInfo').innerHTML),
+    '第三轮：GBK 和 sep= 可用，且额外尾字段仍报原始第 3 行');
 
   console.log('\n[工作表范围写进抬头]');
   const months = XLSX.utils.book_new();
