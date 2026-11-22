@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>截止测试助手</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>截止测试助手 <span class="ver">v0.1.0</span></h1>
+  <p class="sub">把出入库单 / 发票 / 物流记录按资产负债表日切开，出截止测试底稿。<b>文件只在本机浏览器里读，不上传。</b></p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>① 选文件</h2>
+    <div class="row">
+      <input type="file" id="file" accept=".xlsx,.xls,.csv">
+      <button id="sampleBtn" class="ghost" type="button">没有文件？用示例数据试一下</button>
+    </div>
+    <p class="hint" id="fileInfo"></p>
+    <div id="readInfo"></div>
+  </section>
+
+  <section class="card">
+    <h2>② 截止日和窗口</h2>
+    <div class="row">
+      <label>被审计单位 <input type="text" id="clientName" placeholder="写进底稿抬头"></label>
+      <label>资产负债表日 <input type="text" id="cutOff" placeholder="2025-12-31" size="12"></label>
+      <label>前后几天 <input type="text" id="windowDays" size="4" placeholder="5"></label>
+    </div>
+    <p class="hint">窗口只是<b>标记</b>哪些记录离期末近，方便你重点看；它不影响「本期 / 下期」的划分。</p>
+    <div id="statBox" class="stats"></div>
+  </section>
+
+  <section class="card">
+    <h2>③ 核对后生成</h2>
+    <p class="hint">导出的 Excel 里，「是否跨期」「核对结果」「差异」「差异说明」四列留空——那几列要你自己填，工具不预填假数据。</p>
+    <div class="row">
+      <button id="genBtn" type="button" disabled>生成并下载截止测试表</button>
+      <span id="genInfo" class="hint"></span>
+    </div>
+  </section>
+
+  <section class="card hidden" id="tablePanel">
+    <h2>记录预览</h2>
+    <p class="hint" id="tableNote"></p>
+    <div class="tableWrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>原表行</th><th>业务日期</th><th>距期末</th><th>期间</th><th>临近</th>
+            <th>单据号</th><th>往来单位</th><th>摘要</th><th>金额</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>只认「日期 + 金额」的流水表，且金额单位必须是元。读不出的行会带原表行号列出来，不会悄悄跳过。</p>
+</footer>
+
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

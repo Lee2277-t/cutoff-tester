@@ -1,0 +1,438 @@
+/**
+ * 截止测试助手 · 核心逻辑
+ *
+ * 用途：从出入库单 / 发票 / 物流记录的流水里，挑出资产负债表日前后若干天的记录，
+ *      按「截止日前 / 截止日后」分开，生成截止测试底稿。
+ *
+ * 设计原则（沿用前三个工具）：
+ *   1. 金额一律整数分，不出现浮点误差
+ *   2. 认不出的行要报出来，带原表行号，不静默跳过
+ *   3. 拿不准就整表拒绝 —— 宁可让人整理表，也不给错数
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.CutoffCore = factory();
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  var VERSION = '0.1.0';
+
+  /* ---------------- 基础 ---------------- */
+
+  function str(v) {
+    if (v === null || v === undefined) return '';
+    return String(v);
+  }
+
+  function norm(s) {
+    return str(s)
+      .replace(/[\s\u00a0\u3000]/g, '')
+      .replace(/[（）()［］\[\]【】{}]/g, '')
+      .replace(/[：:]/g, '')
+      .toLowerCase();
+  }
+
+  /** 金额 → 整数分。认不出返回 null（不猜） */
+  function toCents(v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (typeof v === 'number') {
+      if (!isFinite(v)) return null;
+      return Math.round(v * 100);
+    }
+    var s = str(v).trim();
+    if (!s) return null;
+    s = s.replace(/[¥￥$]/g, '').replace(/\s/g, '');
+    // 全角括号 = 负数
+    var neg = false;
+    if (/^[（(].*[）)]$/.test(s)) { neg = true; s = s.slice(1, -1); }
+    if (/^-/.test(s)) { neg = true; s = s.slice(1); }
+    if (/^\+/.test(s)) s = s.slice(1);
+    if (!/^\d{1,3}(,\d{3})*(\.\d+)?$/.test(s) && !/^\d+(\.\d+)?$/.test(s)) {
+      // 千分位必须每三位一组：12,34 这种不认
+      return null;
+    }
+    s = s.replace(/,/g, '');
+    var f = parseFloat(s);
+    if (!isFinite(f)) return null;
+    var cents = Math.round(f * 100);
+    return neg ? -cents : cents;
+  }
+
+  function moneyText(cents) {
+    if (cents === null || cents === undefined) return '';
+    var neg = cents < 0;
+    var a = Math.abs(cents);
+    var yuan = Math.floor(a / 100);
+    var fen = a % 100;
+    var s = String(yuan).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    s += '.' + (fen < 10 ? '0' + fen : String(fen));
+    return (neg ? '-' : '') + s;
+  }
+
+  /* ---------------- 日期 ---------------- */
+
+  /** Excel 序列号 → {y,m,d}（1900 日期系统，含 1900-02-29 的历史 bug） */
+  function fromSerial(n) {
+    if (!isFinite(n) || n <= 0 || n > 2958465) return null;
+    // Excel: 1 = 1900-01-01；60 是虚构的 1900-02-29
+    var days = Math.floor(n);
+    if (days < 61) days += 1; // 补偿被 Excel 跳过的 1900-02-29
+    var ms = (days - 1) * 86400000;
+    var d = new Date(Date.UTC(1899, 11, 31) + ms + 0);
+    return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate() };
+  }
+
+  /** 各种写法 → {y,m,d}；认不出返回 null */
+  function parseDate(v) {
+    if (v === null || v === undefined || v === '') return null;
+    if (v instanceof Date && !isNaN(v.getTime())) {
+      return { y: v.getFullYear(), m: v.getMonth() + 1, d: v.getDate() };
+    }
+    if (typeof v === 'number') return fromSerial(v);
+    var s = str(v).trim();
+    if (!s) return null;
+    // 纯数字的 8 位：20260115
+    var m8 = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (m8) return check(+m8[1], +m8[2], +m8[3]);
+    // 2026-01-15 / 2026/1/15 / 2026.1.15 / 2026年1月15日
+    var m = s.match(/^(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})\s*日?/);
+    if (m) return check(+m[1], +m[2], +m[3]);
+    // 1/15/2026 这种不认：中英文环境不同，猜错就是几天的事
+    return null;
+  }
+
+  function check(y, mo, d) {
+    if (!(y >= 1900 && y <= 2200)) return null;
+    if (!(mo >= 1 && mo <= 12)) return null;
+    var last = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    if (!(d >= 1 && d <= last)) return null;
+    return { y: y, m: mo, d: d };
+  }
+
+  function dateKey(o) {
+    if (!o) return '';
+    var mm = o.m < 10 ? '0' + o.m : String(o.m);
+    var dd = o.d < 10 ? '0' + o.d : String(o.d);
+    return o.y + '-' + mm + '-' + dd;
+  }
+
+  function dateText(o) { return dateKey(o); }
+
+  /** 日期 → 天序号，用于算间隔 */
+  function dayNo(o) {
+    return Math.floor(Date.UTC(o.y, o.m - 1, o.d) / 86400000);
+  }
+
+  function diffDays(a, b) {
+    if (!a || !b) return null;
+    return dayNo(a) - dayNo(b);
+  }
+
+  /* ---------------- 认列 ---------------- */
+
+  var DATE_WORDS = /日期|date|时间/;
+  var AMOUNT_WORDS = /金额|价税合计|合计金额|总金额|amount/;
+  var DOC_WORDS = /单据号|单号|凭证号|发票号|出库单|入库单|编号|no\.?$|单据统计号/;
+  var PARTY_WORDS = /客户|供应商|单位名称|往来单位|购货单位|销售单位|对方单位|户名|公司名称|名称/;
+  var SUMMARY_WORDS = /摘要|备注|说明|品名|货物名称|商品名称|事由|内容/;
+  // 出现这些词，说明这更可能是余额表/科目表，不是流水
+  var BALANCE_WORDS = /余额|期初|期末|借方|贷方|累计/;
+
+  function colScore(head, re) {
+    var h = norm(head);
+    if (!h) return 0;
+    if (re.test(h)) return 2;
+    return 0;
+  }
+
+  /** 表头行：必须同时有日期列和金额列 */
+  function detectHeader(rows, sheetName) {
+    var problems = [];
+    var best = null;
+    var limit = Math.min(rows.length, 30);
+    for (var r = 0; r < limit; r++) {
+      var row = rows[r] || [];
+      var cols = { date: [], amount: [], doc: [], party: [], summary: [] };
+      for (var c = 0; c < row.length; c++) {
+        var h = str(row[c]);
+        if (!h || h.length > 20) continue;
+        if (colScore(h, DATE_WORDS)) cols.date.push(c);
+        if (colScore(h, AMOUNT_WORDS)) cols.amount.push(c);
+        if (colScore(h, DOC_WORDS)) cols.doc.push(c);
+        if (colScore(h, PARTY_WORDS)) cols.party.push(c);
+        if (colScore(h, SUMMARY_WORDS)) cols.summary.push(c);
+      }
+      if (cols.date.length && cols.amount.length) {
+        var score = cols.date.length + cols.amount.length * 2 + cols.doc.length + cols.party.length;
+        if (!best || score > best.score) {
+          best = { rowIndex: r, score: score, cols: cols, heads: row };
+        }
+      }
+    }
+
+    if (!best) {
+      var hasAmount = false;
+      for (var r2 = 0; r2 < limit; r2++) {
+        var rw = rows[r2] || [];
+        for (var c2 = 0; c2 < rw.length; c2++) {
+          if (AMOUNT_WORDS.test(norm(str(rw[c2])))) hasAmount = true;
+        }
+      }
+      problems.push(hasAmount
+        ? '这张表有金额列，但找不到日期列。截止测试要按业务日期分「截止日前 / 截止日后」，请确认表里有「日期」这一列。'
+        : '这张表既没有金额列也没有日期列，不像出入库或发票流水。截止测试需要「日期 + 金额」两列，请换一张单据流水表。');
+      return { usable: false, problems: problems, rowIndex: -1 };
+    }
+
+    var heads = best.heads;
+    var header = {
+      usable: true,
+      problems: problems,
+      rowIndex: best.rowIndex,
+      dateCol: best.cols.date[0],
+      amountCol: best.cols.amount[0],
+      docCol: best.cols.doc.length ? best.cols.doc[0] : -1,
+      partyCol: best.cols.party.length ? best.cols.party[0] : -1,
+      summaryCol: best.cols.summary.length ? best.cols.summary[0] : -1,
+      heads: heads,
+      dateHead: str(heads[best.cols.date[0]]),
+      amountHead: str(heads[best.cols.amount[0]]),
+      sheetName: str(sheetName || '')
+    };
+
+    // 多列都叫「金额」时不能任选一列
+    if (best.cols.amount.length > 1) {
+      var names = best.cols.amount.map(function (c) { return str(heads[c]).trim(); });
+      var uniq = names.filter(function (v, i) { return names.indexOf(v) === i; });
+      if (uniq.length > 1) {
+        header.usable = false;
+        problems.push('有 ' + uniq.length + ' 列都像金额（' + uniq.join(' / ') + '），分不清该用哪一列做截止测试——' +
+          '请只保留一列要测试的金额，或把列名改清楚。');
+      }
+    }
+
+    // 余额表的味道：没有单据号、却有「余额/期初/期末」这类列
+    var balCols = [];
+    for (var bc = 0; bc < heads.length; bc++) {
+      if (BALANCE_WORDS.test(norm(str(heads[bc])))) balCols.push(str(heads[bc]).trim());
+    }
+    if (balCols.length && header.docCol < 0) {
+      header.usable = false;
+      problems.push('表里有「' + balCols.slice(0, 3).join(' / ') + '」这类余额列，又没有单据号——' +
+        '这更像余额表，不是逐笔流水。截止测试要的是每一笔业务的发生日期和金额。');
+    }
+
+    return header;
+  }
+
+  /** 合计行：整格就是合计/小计/总计/共计（可带「本页」「以上」和括号后缀） */
+  var TOTAL_CELL = /^(本页|本表|以上)?(合计|小计|总计|共计)(数|额)?$/;
+  function isTotalRow(row) {
+    for (var c = 0; c < row.length && c < 4; c++) {
+      var v = norm(str(row[c]).replace(/[（(][^）)]*[）)]/g, ''));
+      if (v && TOTAL_CELL.test(v)) return true;
+    }
+    return false;
+  }
+
+  /* ---------------- 读行 ---------------- */
+
+  function parseRows(rows, header, opts) {
+    opts = opts || {};
+    var firstExcelRow = opts.firstExcelRow || 1;
+    var problems = (header.problems || []).slice();
+    var records = [];
+    var skipped = [];
+    if (!header.usable || header.rowIndex < 0) {
+      return { records: [], skipped: [], problems: problems, badDates: 0, badAmounts: 0 };
+    }
+
+    var badDates = 0, badAmounts = 0;
+    for (var r = header.rowIndex + 1; r < rows.length; r++) {
+      var row = rows[r] || [];
+      var excelRow = firstExcelRow + r;
+      var dateRaw = row[header.dateCol];
+      var amtRaw = row[header.amountCol];
+      var docNo = header.docCol >= 0 ? str(row[header.docCol]).trim() : '';
+      var party = header.partyCol >= 0 ? str(row[header.partyCol]).trim() : '';
+      var summary = header.summaryCol >= 0 ? str(row[header.summaryCol]).trim() : '';
+
+      // 整行空：跳过，不报
+      var any = false;
+      for (var c = 0; c < row.length; c++) { if (str(row[c]).trim() !== '') { any = true; break; } }
+      if (!any) continue;
+
+      // 合计行：不当成业务，也不当成「日期读不出」
+      if (isTotalRow(row)) {
+        skipped.push({ row: excelRow, reason: '合计行', raw: summary || party || docNo });
+        continue;
+      }
+
+      var d = parseDate(dateRaw);
+      var cents = toCents(amtRaw);
+
+      if (!d) {
+        badDates++;
+        if (str(dateRaw).trim() === '' && cents === null) {
+          // 既没日期也没金额：多半是说明行、页脚
+          skipped.push({ row: excelRow, reason: '说明行（无日期无金额）', raw: summary || party });
+          continue;
+        }
+        skipped.push({ row: excelRow, reason: '日期读不出', raw: str(dateRaw) + (summary ? ' · ' + summary : '') });
+        continue;
+      }
+      if (cents === null) {
+        badAmounts++;
+        skipped.push({ row: excelRow, reason: '金额读不出', raw: str(amtRaw) + (summary ? ' · ' + summary : '') });
+        continue;
+      }
+
+      records.push({
+        row: excelRow,
+        date: d,
+        dateText: dateText(d),
+        docNo: docNo,
+        party: party,
+        summary: summary,
+        cents: cents
+      });
+    }
+
+    if (badDates) {
+      problems.push('有 ' + badDates + ' 行日期读不出（见「读取情况」），这几行没有算进截止测试——请回原表核对日期格式。');
+    }
+    if (badAmounts) {
+      problems.push('有 ' + badAmounts + ' 行金额读不出（见「读取情况」），这几行没有算进截止测试。');
+    }
+    if (records.length && badDates > records.length) {
+      problems.push('读不出日期的行比读出来的还多，这张表可能不适合做截止测试。');
+      header.usable = false;
+    }
+    if (!records.length) {
+      problems.push('一行有效记录都没读出来：这张表没有「日期 + 金额」都齐全的行。');
+      header.usable = false;
+    }
+
+    return { records: records, skipped: skipped, problems: problems, badDates: badDates, badAmounts: badAmounts };
+  }
+
+  /* ---------------- 分桶 ---------------- */
+
+  /**
+   * 按截止日分「本期（截止日前）/ 下期（截止日后）」，并标出临近期末的记录。
+   * windowDays：期末前后各多少天算「临近」
+   */
+  function bucket(records, cutOff, windowDays) {
+    var w = windowDays === undefined ? 5 : windowDays;
+    var out = [];
+    for (var i = 0; i < records.length; i++) {
+      var rec = records[i];
+      var diff = diffDays(rec.date, cutOff); // 正数 = 截止日后
+      out.push({
+        rec: rec,
+        side: diff > 0 ? 'after' : 'before',
+        diff: diff,
+        near: Math.abs(diff) <= w,
+        order: diff
+      });
+    }
+    // 按日期排序，同一天按原表行号
+    out.sort(function (a, b) {
+      if (a.order !== b.order) return a.order - b.order;
+      return a.rec.row - b.rec.row;
+    });
+    return out;
+  }
+
+  function summarize(items) {
+    var s = {
+      before: { n: 0, cents: 0 },
+      after: { n: 0, cents: 0 },
+      near: { n: 0, cents: 0 },
+      total: { n: 0, cents: 0 }
+    };
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      s[it.side].n++; s[it.side].cents += it.rec.cents;
+      if (it.near) { s.near.n++; s.near.cents += it.rec.cents; }
+      s.total.n++; s.total.cents += it.rec.cents;
+    }
+    return s;
+  }
+
+  /* ---------------- 控制表 ---------------- */
+
+  var COLS = [
+    '序号', '原表行', '业务日期', '距期末(天)', '所属期间', '临近期末',
+    '单据号', '往来单位', '摘要', '金额',
+    '是否跨期', '核对结果', '差异', '差异说明'
+  ];
+
+  /** 生成控制表的二维数组（第一行是表头） */
+  function controlRows(items, opts) {
+    opts = opts || {};
+    var head = COLS.slice();
+    var body = [head];
+    var i;
+    for (i = 0; i < items.length; i++) {
+      var it = items[i];
+      body.push([
+        i + 1,
+        it.rec.row,
+        it.rec.dateText,
+        it.diff,
+        it.side === 'before' ? '本期' : '下期',
+        it.near ? '是' : '',
+        it.rec.docNo,
+        it.rec.party,
+        it.rec.summary,
+        it.rec.cents / 100,
+        '',      // 是否跨期：留空给人填
+        '',      // 核对结果
+        '',      // 差异
+        ''       // 差异说明
+      ]);
+    }
+    return body;
+  }
+
+  function fileName(opts) {
+    var client = str(opts.clientName).trim() || '被审计单位';
+    var cut = opts.cutOff ? dateKey(opts.cutOff) : '截止日';
+    return '截止测试_' + client + '_' + cut + '.xlsx';
+  }
+
+  /* ---------------- 自检 ---------------- */
+
+  function selfCheck(records, cutOff) {
+    var problems = [];
+    if (!records.length) return problems;
+    var noDoc = 0, noParty = 0;
+    for (var i = 0; i < records.length; i++) {
+      if (!records[i].docNo) noDoc++;
+      if (!records[i].party) noParty++;
+    }
+    if (noDoc === records.length) {
+      problems.push('所有记录都没有单据号。截止测试通常要追单据，建议先补一列单据号。');
+    }
+    return problems;
+  }
+
+  return {
+    VERSION: VERSION,
+    toCents: toCents,
+    moneyText: moneyText,
+    parseDate: parseDate,
+    dateKey: dateKey,
+    dateText: dateText,
+    diffDays: diffDays,
+    detectHeader: detectHeader,
+    parseRows: parseRows,
+    bucket: bucket,
+    summarize: summarize,
+    controlRows: controlRows,
+    fileName: fileName,
+    selfCheck: selfCheck,
+    COLS: COLS
+  };
+});
