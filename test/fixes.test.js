@@ -231,8 +231,7 @@ console.log('\n[重复单据与三位以上小数]');
   ]);
   eq(p.records.map(r => r.cents).join(','), '123457,101,-101,-123,0,101', '逐笔按十进制四舍五入到分');
   ok(p.problems.some(s => /有 5 行金额是三位以上小数，已按四舍五入到分/.test(s)), '小数位数提示含科学计数法数值');
-  ok(p.problems.some(s => /有 2 个单据号重复出现（如 XS-2025-001 出现 2 次），请确认是不是重复粘贴/.test(s)),
-    '按不同的重复单据号计数，空单据号不计，保留全部六笔');
+  ok(!p.problems.some(s => /单据号重复出现/.test(s)), '同号但日期或金额不同的六笔明细均保留且不提示重复');
 }
 
 (async function () {
@@ -261,12 +260,54 @@ console.log('\n[重复单据与三位以上小数]');
     JSON.stringify([[3, '说明行（无日期无金额）'], [4, '日期读不出'], [5, '金额读不出'], [6, '合计行']]),
     '底稿列出每条排除项的原表行号和原因'
   );
-  ok(grid.slice(section + 1).some(row => row[0] === '说明' && /单据号重复出现/.test(row[1])), '重复单据提示写进同表说明区');
+  ok(!grid.slice(section + 1).some(row => row[0] === '说明' && /单据号重复出现/.test(row[1])), '跨期冲销的同号明细不写重复说明');
   const totalCell = wb.Sheets['截止测试']['J' + (total + 1)];
   eq(totalCell.f, 'SUM(J8:J9)', '保留合计公式且公式只覆盖明细');
   eq(totalCell.v, 0, '零合计也有数值缓存');
   const xml = Buffer.from(wb.files['xl/worksheets/sheet1.xml'].content).toString();
   ok(xml.includes('<f>SUM(J8:J9)</f><v>0</v>'), '实际写出的 XLSX XML 同时含公式和缓存值');
+
+  console.log('\n[B1 · 带限定语的合计行]');
+  const productHead = ['日期', '单据号', '商品名称', '数量', '单价', '金额'];
+  const product = ['2025-12-30', 'A', '零件', 1, 500, 500];
+  await loadFile([
+    productHead, product, ['2025-12-30', 'A', '配件', 1, 600, 600],
+    ['2025-12-30', 'A', '本单合计（价税合计）', 2, null, 1100],
+    ['2025-12-31', 'B', '材料', 1, 1000, 1000],
+    ['2025-12-31', 'B', '本单合计（价税合计）', 1, null, 1000]
+  ]);
+  fire('genBtn', 'click');
+  const totalsWb = fixture.readExport();
+  const totalsGrid = table(totalsWb);
+  const totalsIndex = totalsGrid.findIndex(row => row[0] === '合计');
+  const totalsCell = totalsWb.Sheets['截止测试']['J' + (totalsIndex + 1)];
+  eq(totalsCell.v, 2100, 'B1：真实 XLSX 导出的合计缓存是 2,100.00');
+  eq(totalsCell.f, 'SUM(J8:J10)', 'B1：求和范围只有三条业务明细');
+  eq(totalsGrid.filter(row => row[1] === '合计行').map(row => row[0]).join(','), '4,6',
+    'B1：读取情况留有两行价税合计的原始行号');
+  for (const label of ['合计：不含税', '本页小计（不含税）', '2025年12月合计', '2025-12合计含税']) {
+    const description = '合计（按合同约定分批交付）';
+    await loadFile([productHead, product, ['2025-12-30', 'B', description, 1, 200, 200],
+      ['2025-12-30', 'A', label, 2, null, 700]]);
+    fire('genBtn', 'click');
+    const variant = table(fixture.readExport());
+    eq(JSON.stringify(variant.filter(row => typeof row[0] === 'number' && typeof row[9] === 'number').map(row => [row[8], row[9]])),
+      JSON.stringify([['零件', 500], [description, 200]]), 'B1：排除「' + label + '」并保留括号内有长说明的业务');
+  }
+
+  console.log('\n[N1 · 同号明细与疑似重复粘贴]');
+  const pasted = ['2025-12-30', 'DUP-001', '华远', '1,234.560'];
+  await loadFile([
+    head, ['2025-12-30', 'FP-001', '华远', 100], ['2025-12-30', 'FP-001', '华远', 200],
+    ['2025-12-30', 'CK-001', '东方', 500], ['2025-12-31', 'CK-001', '东方', 500],
+    ['2025-12-30', 'AMT-001', '东方', 1.005], ['2025-12-30', 'AMT-001', '东方', 1.006],
+    pasted, ['2025/12/30', 'DUP-001', '华远', 1234.56], ['2025-12-30', 'DUP-001', '东方', 1234.56]
+  ]);
+  fire('genBtn', 'click');
+  const duplicateGrid = table(fixture.readExport());
+  const duplicateNotes = duplicateGrid.filter(row => row[0] === '说明' && /单据号重复出现/.test(row[1])).map(row => row[1]);
+  eq(duplicateNotes.join('\n'), '有 1 个单据号重复出现（如 DUP-001 出现 2 次），请确认是不是重复粘贴。',
+    'N1：底稿只提示日期、原金额和往来单位均相同的两行');
 
   console.log('\n[无记录时直接调用导出]');
   await loadFile([head]);
@@ -282,9 +323,16 @@ console.log('\n[重复单据与三位以上小数]');
   const csvGrid = table(fixture.readExport());
   eq(csvGrid[7][7].replace(/\r\n/g, '\n'), '华远, "一部"\n二组', '引用字段内的逗号、引号和换行保留');
   eq(csvGrid[7][9], 1234.56, '带引号的千分位金额正常导出');
-  await loadCsv(csv + '\r\n2025-12-31,B,东方,200,,');
-  eq(el('genBtn').disabled, true, '连空的超出列也拒绝');
-  ok(/第 4 行列数比表头多/.test(el('readInfo').innerHTML), '多行引用字段之后仍报源文件行号');
+  await loadCsv(csv + '\r\n2025-12-31,B,东方,200,,额外内容');
+  eq(el('genBtn').disabled, true, '超出的非空列拒绝');
+  ok(/第 4 行列数和表头不一致/.test(el('readInfo').innerHTML), '多行引用字段之后仍报源文件行号');
+  await loadCsv(csv + '\r\n2025-12-31,B,东方,200,,""\r\n,,,,,,');
+  fire('genBtn', 'click');
+  const padded = fixture.readExport();
+  eq(padded && table(padded).find(row => row[0] === '合计')[9], 1434.56, 'B2：多出的空字段和空行不影响 CSV 合计');
+  await loadCsv('日期,单据号,客户,金额,,\r\n2025-12-30,A,东方,200\r\n2025-12-31,B,东方,500,备注');
+  ok(el('genBtn').disabled && /第 3 行列数和表头不一致/.test(el('readInfo').innerHTML),
+    'B2：缺失未命名尾列的第 2 行可读，第 3 行缺列时有内容则不能当作空字段放行');
   await loadCsv('sep=;\r\n日期;单据号;客户;金额\r\n2025-12-30;A;华远;1,234.56');
   eq(el('genBtn').disabled, false, 'Excel 的 sep 声明仍可用');
 
@@ -300,6 +348,29 @@ console.log('\n[重复单据与三位以上小数]');
   const headIndex = monthGrid.findIndex(row => row[0] === '序号');
   ok(monthGrid.slice(0, headIndex).flat().includes('本表只包含工作表「12月」的数据；工作簿另有 11 张可用表未参与。'),
     '抬头点明 12 月和未参与的 11 张可用表，不计封面');
+
+  console.log('\n[N2 · 被拒工作表的抬头与数量上限]');
+  const rejected = XLSX.utils.book_new();
+  const dateConflict = [
+    ['日期', '记账日期', '单据号', '金额'],
+    ['2025-12-31', '2025-12-30', 'CONFLICT', 999]
+  ];
+  for (const [name, rows] of [
+    ['12月', dateConflict], ['封面汇总', [head, a]],
+    ['两列金额', [['日期', '单据号', '金额', '含税金额'], ['2025-12-31', 'B', 100, 200]]],
+    ['空明细', [head]], ['封面', [['封面']]], ['附注', [['附注']]]
+  ]) {
+    XLSX.utils.book_append_sheet(rejected, XLSX.utils.aoa_to_sheet(rows), name);
+  }
+  await loadWorkbook(rejected);
+  fire('genBtn', 'click');
+  const rejectedGrid = table(fixture.readExport());
+  const rejectedHeading = rejectedGrid.slice(0, rejectedGrid.findIndex(row => row[0] === '序号')).map(row => row[0]);
+  const notes = rejectedHeading.filter(text => /^工作表「/.test(text));
+  ok(notes.length === 3 && /^工作表「12月」未参与：第 2 行.*「日期」.*「记账日期」.*日期值不同/.test(notes[0]) &&
+    /^工作表「两列金额」未参与：.*2 列都像金额/.test(notes[1]) && /^工作表「空明细」未参与：一行有效记录都没读出来/.test(notes[2]),
+    'N2：抬头逐行列前 3 张被拒表及各自原因');
+  ok(rejectedHeading.some(text => /等 5 张/.test(text)), 'N2：超过 3 张时写明被拒表总数');
 
   console.log('\n============================================================');
   if (fail.length) {

@@ -117,6 +117,16 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   ]);
   ok(/4 笔 \/ 3,200\.00/.test(el('statBox').innerHTML), '本单合计排除后仍是 4 笔 3,200.00');
   ok(/合计行：2 行.*第 4 行.*第 7 行/.test(el('readInfo').innerHTML), '界面列出两行本单合计的原表行号');
+  await loadFile([
+    ['日期', '单据号', '商品名称', '金额'],
+    ['2025-12-30', 'A', '材料', 1100],
+    ['2025-12-30', 'A', '本单合计（价税合计）', 1100],
+    ['2025-12-31', 'B', '零件', 1000],
+    ['2025-12-31', 'B', '合计：不含税', 1000]
+  ]);
+  ok(/2 笔 \/ 2,100\.00/.test(el('statBox').innerHTML) &&
+    /合计行：2 行.*第 3 行.*第 5 行/.test(el('readInfo').innerHTML),
+    'B1：预览合计只算两笔，读取情况点名被排除的两行');
 
   console.log('\n[日期边界与 1904 工作簿]');
   await loadFile([
@@ -158,6 +168,9 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   await loadFile([head, a, b, a, b]);
   ok(/4 笔 \/ 6,000\.00/.test(el('statBox').innerHTML), '重复单据只提示，4 笔均保留');
   ok(/有 2 个单据号重复出现（如 XS-2025-001 出现 2 次），请确认是不是重复粘贴/.test(el('readInfo').innerHTML), '界面提示重复单据及次数');
+  await loadFile([head, a, [a[0], a[1], a[2], 500], b, ['2026-01-02', b[1], b[2], b[3]]]);
+  ok(/4 笔 \/ 5,500\.00/.test(el('statBox').innerHTML) && !/单据号重复出现/.test(el('readInfo').innerHTML),
+    'N1：同号分项和分日明细均保留，界面没有误报');
   await loadFile([head,
     ['2025-12-30', 'A', '华远', '1,234.567'],
     ['2025-12-31', 'B', '华远', 1.005],
@@ -175,10 +188,23 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   const csv = '日期,单据号,客户,金额\r\n2025-12-30,A,华远,';
   await loadCsv(csv + '1,234.56');
   eq(el('genBtn').disabled, true, '无引号千分位的 CSV 拒绝生成');
-  ok(/第 2 行列数比表头多，可能有逗号没加引号/.test(el('readInfo').innerHTML), '界面给出 CSV 行号和修正方向');
+  ok(/第 2 行列数和表头不一致.*千分位或文本里的逗号没加引号/.test(el('readInfo').innerHTML), '界面给出 CSV 行号和修正方向');
   await loadCsv(csv + '"1,234.56"');
   eq(el('genBtn').disabled, false, '改成带引号的 CSV 就能生成');
   ok(/1 笔 \/ 1,234\.56/.test(el('statBox').innerHTML), 'CSV 修正后金额完整');
+
+  const wideCsv = '日期,单据号,客户,金额,摘要,备注\r\n';
+  await loadCsv(wideCsv + '2025-12-30,A,华远,1,234.56\r\n2025-12-31,B,东方,500.00');
+  eq(el('genBtn').disabled, true, 'B2：拆碎千分位后仍少于表头列数的 CSV 也拒绝生成');
+  ok(/第 2 行列数和表头不一致.*千分位或文本里的逗号没加引号/.test(el('readInfo').innerHTML), 'B2：短行提示指向源文件行号和引号');
+  ok(el('tableBody').innerHTML === '' && el('statBox').innerHTML === '' && el('genInfo').textContent === '',
+    'B2：短行拒绝后清空预览、汇总和上次生成提示');
+  fire('genBtn', 'click');
+  const didNotExport = fixture.written === null;
+  await loadCsv(wideCsv + '2025-12-30,A,华远,"1,234.56",,\r\n2025-12-31,B,东方,500.00,,');
+  fire('genBtn', 'click');
+  ok(didNotExport && fixture.readExport()?.Sheets['截止测试'].J10?.v === 1734.56,
+    'B2：拒绝错误底稿；加金额引号并保留空字段后可导出 1,734.56');
 
   console.log('\n[多工作表生成与切换示例]');
   const months = XLSX.utils.book_new();
@@ -191,6 +217,24 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     '按钮导出的底稿抬头写明工作表范围');
   fire('sampleBtn', 'click');
   ok(!/还有 1 张表也能读/.test(el('readInfo').innerHTML), '切到示例后不沿用上一工作簿范围');
+
+  const fallback = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(fallback, XLSX.utils.aoa_to_sheet([
+    ['日期', '记账日期', '单据号', '金额'],
+    ['2025-12-31', '2025-12-30', 'CONFLICT', 999]
+  ]), '12月');
+  XLSX.utils.book_append_sheet(fallback, XLSX.utils.aoa_to_sheet([head, a]), '封面汇总');
+  await loadWorkbook(fallback);
+  fire('genBtn', 'click');
+  const fallbackGrid = XLSX.utils.sheet_to_json(fixture.readExport().Sheets['截止测试'], { header: 1 });
+  const fallbackHead = fallbackGrid.slice(0, fallbackGrid.findIndex(row => row[0] === '序号'));
+  fire('sampleBtn', 'click');
+  fire('genBtn', 'click');
+  const sampleExport = XLSX.utils.sheet_to_json(fixture.readExport().Sheets['截止测试'], { header: 1 });
+  ok(fallbackHead.some(row => /本表只包含工作表「封面汇总」/.test(row[0])) &&
+    fallbackHead.some(row => /工作表「12月」未参与：第 2 行.*「日期」.*「记账日期」.*日期值不同/.test(row[0])) &&
+    !sampleExport.some(row => /工作表「12月」未参与/.test(row[0])),
+    'N2：导出抬头说明参与和被拒的表，切换到示例后清除旧说明');
 
   console.log('\n============================================================');
   if (fail.length) {

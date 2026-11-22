@@ -14,6 +14,7 @@
     picked: null,
     items: [],
     otherSheets: 0,
+    rejectedSheets: [],
     error: ''
   };
 
@@ -50,29 +51,44 @@
 
   /** 逐张试，按「读出的记录数」挑最像流水的那张 */
   function pickSheet(wb, csvRows) {
-    var best = null, why = '', parseWhy = '', usableCount = 0;
+    var best = null, why = '', parseWhy = '', usableCount = 0, rejected = [];
     wb.SheetNames.forEach(function (name) {
       var rows = sheetRows(wb, name);
       var header = Core.detectHeader(rows, name);
+      var reason, origin = sheetOrigin(wb, name);
       if (header.rowIndex < 0 || !header.usable) {
-        if (!why && header.problems.length) why = header.problems.join('；');
+        reason = header.problems.join('；');
+        rejected.push({ name: name, reason: reason });
+        if (!why) why = reason;
         return;
       }
       if (csvRows) {
-        var columns = csvRows[header.rowIndex].columns;
-        for (var r = header.rowIndex + 1; r < csvRows.length; r++) {
-          if (csvRows[r].columns <= columns) continue;
-          parseWhy = '第 ' + csvRows[r].line + ' 行列数比表头多，可能有逗号没加引号。';
+        var headerRow = origin + header.rowIndex;
+        var layout = csvRows[headerRow];
+        for (var r = headerRow + 1; r < csvRows.length; r++) {
+          var row = csvRows[r];
+          // 短行只允许省掉无列名的尾部空字段，有列名的空值仍需保留分隔符。
+          var mismatch = row.columns < layout.columns
+            ? row.columns < layout.filledColumns || row.filledColumns > layout.filledColumns
+            : row.filledColumns > layout.columns;
+          if (!row.filledColumns || !mismatch) continue;
+          parseWhy = '第 ' + row.line + ' 行列数和表头不一致。常见原因是千分位或文本里的逗号没加引号，' +
+            '请给含逗号的内容加上双引号，并保留空列的分隔符。';
           return;
         }
       }
-      var parsed = Core.parseRows(rows, header, { firstExcelRow: sheetOrigin(wb, name) + 1, date1904: Core.date1904Of(wb) });
-      if (!header.usable) { if (!parseWhy) parseWhy = parsed.problems.join('；'); return; }
+      var parsed = Core.parseRows(rows, header, { firstExcelRow: origin + 1, date1904: Core.date1904Of(wb) });
+      if (!header.usable) {
+        reason = parsed.problems.join('；');
+        rejected.push({ name: name, reason: reason });
+        if (!parseWhy) parseWhy = reason;
+        return;
+      }
       usableCount++;
-      var cand = { name: name, header: header, parsed: parsed, rows: rows, origin: sheetOrigin(wb, name) };
+      var cand = { name: name, header: header, parsed: parsed, rows: rows, origin: origin };
       if (!best || cand.parsed.records.length > best.parsed.records.length) best = cand;
     });
-    return { best: best, why: parseWhy || why, usableSheets: usableCount };
+    return { best: best, why: parseWhy || why, usableSheets: usableCount, rejected: rejected };
   }
 
   function decodeCsv(buf) {
@@ -106,25 +122,39 @@
     var sep = directive ? directive[1] : csvSeparator(text);
     var start = directive ? directive[0].length : 0;
     var line = directive ? 2 : 1;
-    var rowLine = line, fieldStart = start, columns = 1, quoted = false;
+    var rowLine = line, fieldStart = start, columns = 1, filledColumns = 0, quoted = false;
     var rows = [];
+    function finishField(end) {
+      var field = text.slice(fieldStart, end).trim();
+      if (field && field !== '""') filledColumns = columns;
+    }
+    function finishRow(end) {
+      finishField(end);
+      rows.push({ line: rowLine, columns: columns, filledColumns: filledColumns });
+    }
     // 工作表会丢掉空字段，CSV 列数和原始行号需要从源文本保留。
     for (var i = start; i < text.length; i++) {
       var ch = text.charAt(i);
       if (ch === '"' && text.charAt(fieldStart) === '"') quoted = !quoted;
-      else if (!quoted && ch === sep) { columns++; fieldStart = i + 1; }
+      else if (!quoted && ch === sep) {
+        finishField(i);
+        columns++;
+        fieldStart = i + 1;
+      }
       else if (ch === '\r' || ch === '\n') {
+        var end = i;
         if (ch === '\r' && text.charAt(i + 1) === '\n') i++;
         line++;
         if (!quoted) {
-          rows.push({ line: rowLine, columns: columns });
+          finishRow(end);
           rowLine = line;
           fieldStart = i + 1;
           columns = 1;
+          filledColumns = 0;
         }
       }
     }
-    rows.push({ line: rowLine, columns: columns });
+    finishRow(text.length);
     return { separator: sep, rows: rows };
   }
 
@@ -309,6 +339,10 @@
         (state.otherSheets ? '；工作簿另有 ' + state.otherSheets + ' 张可用表未参与' : '') + '。');
     }
     rows.push(scope);
+    state.rejectedSheets.slice(0, 3).forEach(function (sheet) {
+      rows.push(['工作表「' + sheet.name + '」未参与：' + sheet.reason]);
+    });
+    if (state.rejectedSheets.length > 3) rows.push(['以上等 ' + state.rejectedSheets.length + ' 张工作表未参与。']);
     var sumLine = ['汇总', '', '本期 ' + sum.before.n + ' 笔 / ' + money(sum.before.cents),
       '下期 ' + sum.after.n + ' 笔 / ' + money(sum.after.cents),
       '临近期末 ' + sum.near.n + ' 笔 / ' + money(sum.near.cents),
@@ -377,6 +411,7 @@
     state.sheetName = '出库单';
     state.wb = null;
     state.otherSheets = 0;
+    state.rejectedSheets = [];
     $('fileInfo').textContent = '示例数据（虚构）';
     $('clientName').value = '示例被审计单位';
     $('cutOff').value = '2025-12-31';
@@ -393,9 +428,11 @@
       var f = input.files && input.files[0];
       if (!f) return;
       state.error = '';
+      $('genInfo').textContent = '';
       $('fileInfo').textContent = '正在读 ' + f.name + ' …';
       readWorkbook(f).then(function (res) {
         state.otherSheets = 0;
+        state.rejectedSheets = [];
         if (!res.ok) {
           state.error = '文件读不了：' + res.error;
           state.picked = null;
@@ -415,6 +452,7 @@
         }
         state.picked = pick.best;
         state.otherSheets = pick.usableSheets - 1;
+        state.rejectedSheets = pick.rejected;
         state.sheetName = pick.best.name;
         $('fileInfo').textContent = f.name + ' · ' + pick.best.name;
         recompute();

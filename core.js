@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.2';
+  var VERSION = '0.1.3';
 
   /* ---------------- 基础 ---------------- */
 
@@ -61,7 +61,10 @@
     var cents = Number(digits.slice(0, length).padEnd(length, '0'));
     if (centEnd >= 0 && digits.charAt(centEnd) >= '5') cents++;
     if (!isFinite(cents)) return null;
-    return { cents: neg && cents ? -cents : cents, rounded: decimals > 2 };
+    // 比较重复明细时保留原金额精度，避免把舍入到同一分的金额当成相同。
+    var unscaled = digits.replace(/0+$/, '');
+    var exact = unscaled ? (neg ? '-' : '') + unscaled.replace(/^0+/, '') + 'e' + (digits.length - unscaled.length - decimals) : '0';
+    return { cents: neg && cents ? -cents : cents, rounded: decimals > 2, exact: exact };
   }
 
   /** 金额 → 整数分。认不出返回 null（不猜） */
@@ -247,15 +250,17 @@
 
   /** 合计行：整格就是合计/小计/总计/共计（可带前缀和括号后缀）
    *  单据式明细里常见「本单合计」「本月合计」「单据合计」，都要认——认不出就是金额翻倍。 */
-  var TOTAL_CELL = /^(本页|本表|以上|本单|本月|本期|本日|本季|本年|单据|累计|小计|明细)?(合计|小计|总计|共计|累计)(数|额|金额)?$/;
+  var TOTAL_CELL = /^(本页|本表|以上|本单|本月|本期|本日|本季|本年|单据|累计|小计|明细|\d{4}年\d{1,2}月|\d{1,2}月|\d{4}-\d{1,2})?(合计|小计|总计|共计|累计)(数|额|金额|不含税|含税|价税合计|未税|税额)?$/;
   /** 有日期的行里，摘要、备注等说明栏的「合计」可以是业务原文。 */
   function isTotalRow(row, heads, date) {
     for (var c = 0; c < row.length; c++) {
       var raw = str(row[c]).trim();
-      if (!raw || raw.length > 8) continue;
-      if (date && raw === '合计' && /摘要|备注|说明|事由|内容/.test(norm(heads[c]))) continue;
-      var v = norm(raw.replace(/[（(][^）)]*[）)]/g, ''));
-      if (v && TOTAL_CELL.test(v)) return true;
+      if (!raw) continue;
+      var v = norm(raw);
+      if (date && v === '合计' && /摘要|备注|说明|事由|内容/.test(norm(heads[c]))) continue;
+      if (TOTAL_CELL.test(v)) return true;
+      // 兼容原先能识别的短标签，如「合计（元）」。
+      if (raw.length <= 8 && TOTAL_CELL.test(norm(raw.replace(/[（(][^）)]*[）)]/g, '')))) return true;
     }
     return false;
   }
@@ -275,7 +280,7 @@
     var badDates = 0, badAmounts = 0, roundedAmounts = 0;
     var dateOpts = { date1904: opts.date1904 };
     var otherDateCols = (header.dateCols || [header.dateCol]).slice(1);
-    var docCounts = new Map();
+    var detailCounts = new Map(), duplicateDocs = new Map();
     for (var r = header.rowIndex + 1; r < rows.length; r++) {
       var row = rows[r] || [];
       var excelRow = firstExcelRow + r;
@@ -328,11 +333,17 @@
       }
 
       if (amount.rounded) roundedAmounts++;
-      if (docNo) docCounts.set(docNo, (docCounts.get(docNo) || 0) + 1);
+      var dateLabel = dateText(d);
+      if (docNo) {
+        var key = JSON.stringify([docNo, dateLabel, amount.exact, party]);
+        var count = (detailCounts.get(key) || 0) + 1;
+        detailCounts.set(key, count);
+        if (count > (duplicateDocs.get(docNo) || 1)) duplicateDocs.set(docNo, count);
+      }
       records.push({
         row: excelRow,
         date: d,
-        dateText: dateText(d),
+        dateText: dateLabel,
         docNo: docNo,
         party: party,
         summary: summary,
@@ -350,8 +361,8 @@
       problems.push('有 ' + roundedAmounts + ' 行金额是三位以上小数，已按四舍五入到分。');
     }
     var duplicates = [];
-    docCounts.forEach(function (count, docNo) {
-      if (count > 1) duplicates.push(docNo + ' 出现 ' + count + ' 次');
+    duplicateDocs.forEach(function (count, docNo) {
+      duplicates.push(docNo + ' 出现 ' + count + ' 次');
     });
     if (duplicates.length) {
       problems.push('有 ' + duplicates.length + ' 个单据号重复出现（如 ' + duplicates[0] + '），请确认是不是重复粘贴。');
