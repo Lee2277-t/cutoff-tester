@@ -4,6 +4,9 @@
 
 单页 HTML，解压后双击 `index.html` 就能用。不用装、不用联网，**文件只在浏览器里读，不上传任何地方**。
 
+![截止测试助手界面](docs/preview.png)
+
+**不想读文档？** [下载最新版 ZIP](../../releases/latest) → 解压 → 双击 index.html，就这样。仓库里也有 index.html，直接打开同样是完整功能。
 ---
 
 ## 它解决什么
@@ -164,3 +167,7 @@ v0.2.0
 ## 许可
 
 MIT
+
+---
+
+更多离线小工具（审计、文档、系统）见 [awesome-lee2277](https://github.com/Lee2277-t/awesome-lee2277)。
